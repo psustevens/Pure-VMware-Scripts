@@ -9,7 +9,80 @@
             "type": "PowerShell",
             "request": "launch",
             "script": "${file}",
-            "args": []
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "New NFSv3 Datastore",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/New-NFSDatastore.ps1",
+            "args": [
+                "-DatastoreName", "New-FS",
+                "-DatastoreSize", "20TB",
+                "-NFSVersion", "nfsv3",
+                "-vCenterCluster", "cluster-prod",
+                "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab",
+                "-vCenterServer", "vc02.fsa.lab",
+                "-QuotaEnabled", "$true",
+                "-SnapshotEnabled", "$true"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "New NFSv41 Datastore (+ Nconnect)",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/New-NFSDatastore.ps1",
+            "args": [
+                "-DatastoreName", "NFSv41-Test",
+                "-DatastoreSize", "20TB",
+                "-NFSVersion", "nfsv41",
+                "-vCenterCluster", "cluster-prod",
+                "-NconnectSessions", "4",
+                "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab",
+                "-vCenterServer", "vc02.fsa.lab",
+                "-QuotaEnabled", "$true",
+                "-SnapshotEnabled", "$true"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "New NFS FileSystem: New-FS",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/New-NFSFileSystem.ps1",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Remove-NFSDatastoreFromFlashArray: NFSv3-Test",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/Remove-NFSDatastoreFromFlashArray.ps1",
+            "args": [
+                "-DatastoreName", "NFSv3-Test",
+                "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Remove-NFSDatastoreFromFlashArray: NFSv41-Test",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/Remove-NFSDatastoreFromFlashArray.ps1",
+            "args": [
+                "-DatastoreName", "NFSv41-Test",
+                "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "PowerShell: Interactive Session",
+            "type": "PowerShell",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "createTemporaryIntegratedConsole": false
         }
     ]
 }
