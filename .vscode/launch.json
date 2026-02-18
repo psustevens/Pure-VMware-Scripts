@@ -13,46 +13,52 @@
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "New NFSv3 Datastore",
+            "name": "New NFS FileSystem: NFSv3-Test",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/New-PureNFSFileSystem.ps1",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "New NFSv3 Datastore (Hourly Snapshots)",
             "type": "PowerShell",
             "request": "launch",
             "script": "${workspaceFolder}/New-NFSDatastore.ps1",
             "args": [
-                "-DatastoreName", "New-FS",
-                "-DatastoreSize", "20TB",
+                "-DatastoreName", "NFSv3-Hourly",
+                "-DatastoreSize", "10TB",
                 "-NFSVersion", "nfsv3",
                 "-vCenterCluster", "cluster-prod",
                 "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab",
                 "-vCenterServer", "vc02.fsa.lab",
                 "-QuotaEnabled", "$true",
-                "-SnapshotEnabled", "$true"
+                "-SnapshotEnabled", "$true",
+                "-SnapshotRulesEvery", "3600000",
+                "-SnapshotRulesKeepFor", "86400000",
+                "-SnapshotClientName", "hourly"
             ],
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "New NFSv41 Datastore (+ Nconnect)",
+            "name": "New NFSv4 Datastore (Hourly Snapshots + Nconnect)",
             "type": "PowerShell",
             "request": "launch",
             "script": "${workspaceFolder}/New-NFSDatastore.ps1",
             "args": [
-                "-DatastoreName", "NFSv41-Test",
+                "-DatastoreName", "NFSv4-Hourly",
                 "-DatastoreSize", "20TB",
-                "-NFSVersion", "nfsv41",
+                "-NFSVersion", "nfsv4",
                 "-vCenterCluster", "cluster-prod",
-                "-NconnectSessions", "4",
+                "-NconnectSessions", "8",
                 "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab",
                 "-vCenterServer", "vc02.fsa.lab",
                 "-QuotaEnabled", "$true",
-                "-SnapshotEnabled", "$true"
+                "-SnapshotEnabled", "$true",
+                "-SnapshotRulesEvery", "3600000",
+                "-SnapshotRulesKeepFor", "86400000",
+                "-SnapshotClientName", "hourly"
             ],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "name": "New NFS FileSystem: New-FS",
-            "type": "PowerShell",
-            "request": "launch",
-            "script": "${workspaceFolder}/New-NFSFileSystem.ps1",
-            "args": [],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -67,13 +73,44 @@
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "Remove-NFSDatastoreFromFlashArray: NFSv41-Test",
+            "name": "Remove-NFSDatastoreFromFlashArray: NFSv4-Test",
             "type": "PowerShell",
             "request": "launch",
             "script": "${workspaceFolder}/Remove-NFSDatastoreFromFlashArray.ps1",
             "args": [
-                "-DatastoreName", "NFSv41-Test",
+                "-DatastoreName", "NFSv4-Test",
                 "-FlashArrayEndpoint", "sn1-x90r2-f07-27.fsa.lab"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Mount Existing NFS: NFSv3-Test",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/New-NFSDatastore.ps1",
+            "args": [
+                "-DatastoreName", "NFSv3-Test",
+                "-NFSExportPath", "/NFSv3-Test",
+                "-NFSHost", "filevip-f07-27.fsa.lab",
+                "-vCenterCluster", "cluster-prod",
+                "-vCenterServer", "vc02.fsa.lab",
+                "-NFSVersion", "nfsv3"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Mount Existing NFS: NFSv4-Test",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/New-NFSDatastore.ps1",
+            "args": [
+                "-DatastoreName", "NFSv4-Test",
+                "-NFSExportPath", "/NFSv4-Test",
+                "-NFSHost", "filevip-f07-27.fsa.lab",
+                "-vCenterCluster", "cluster-prod",
+                "-vCenterServer", "vc02.fsa.lab",
+                "-NFSVersion", "nfsv4",
+                "-NconnectSessions", "8"
             ],
             "cwd": "${workspaceFolder}"
         },

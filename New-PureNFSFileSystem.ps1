@@ -4,10 +4,10 @@ Import-Module PureStoragePowerShellSDK2
 
 # FlashArray variables
 $ArrayName        = 'sn1-x90r2-f07-27.fsa.lab'  # FlashArray FQDN
-$FileSystemName   = 'NFSv3-Test'                    # File System Name
+$FileSystemName   = 'NFSv4-Test'                    # File System Name
 $SnapshotEvery    = 1800000                     # Snapshot every 30 minutes (in ms)
 $SnapshotKeepFor  = 86400000                    # Keep snapshots for 1 day (in ms)
-$NFSversion       = 'nfsv3'                     # Use nfsv41 for NFS version
+$NFSversion       = 'nfsv4'                     # Use nfsv41 for NFS version
 $QuotaLimit       = 10TB                        # Quota limit for the file system
 
 #region Create NFS FileSystem
