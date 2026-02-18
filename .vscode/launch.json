@@ -110,7 +110,17 @@
                 "-vCenterCluster", "cluster-prod",
                 "-vCenterServer", "vc02.fsa.lab",
                 "-NFSVersion", "nfsv4",
-                "-NconnectSessions", "8"
+                "-NconnectSessions", "4"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Get NFS 4.1 Parameters",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/Get-NFS41Parameters.ps1",
+            "args": [
+                "-vCenterServer", "vc02.fsa.lab"
             ],
             "cwd": "${workspaceFolder}"
         },

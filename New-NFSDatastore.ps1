@@ -83,7 +83,8 @@ try {
     Import-Module VMware.VimAutomation.Core -ErrorAction Stop
     Write-Host "[OK] Module loaded successfully" -ForegroundColor Green
 } catch {
-    Write-Host "[ERROR] Failed to load required module: $_" -ForegroundColor Red
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to load required module: $ErrorMsg" -ForegroundColor Red
     exit 1
 }
 
@@ -100,7 +101,8 @@ try {
         -ErrorAction Stop | Out-Null
     Write-Host "[OK] Connected to vCenter: $vCenterServer" -ForegroundColor Green
 } catch {
-    Write-Host "[ERROR] Failed to connect to vCenter: $_" -ForegroundColor Red
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to connect to vCenter: $ErrorMsg" -ForegroundColor Red
     exit 1
 }
 
@@ -114,7 +116,8 @@ try {
     $Cluster = Get-Cluster -Name $vCenterCluster -ErrorAction Stop
     Write-Host "[OK] Found cluster: $($Cluster.Name)" -ForegroundColor Green
 } catch {
-    Write-Host "[ERROR] Cluster '$vCenterCluster' not found: $_" -ForegroundColor Red
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Cluster '$vCenterCluster' not found: $ErrorMsg" -ForegroundColor Red
     Disconnect-VIServer -Server $vCenterServer -Confirm:$false
     exit 1
 }
@@ -167,7 +170,8 @@ if ($NFSVersion -eq 'nfsv4') {
             Write-Host "    Ping to ${NFSHost}: PARTIAL ($($PingResult.Summary.PacketLost)% loss)" -ForegroundColor Yellow
         }
     } catch {
-        Write-Host "    Ping test failed: $_" -ForegroundColor Yellow
+        $ErrorMsg = $_.Exception.Message
+        Write-Host "    Ping test failed: $ErrorMsg" -ForegroundColor Yellow
     }
 
     # Check VMkernel adapters
@@ -187,7 +191,8 @@ if ($NFSVersion -eq 'nfsv4') {
             Write-Host "    No existing NFS 4.1 datastores" -ForegroundColor Gray
         }
     } catch {
-        Write-Host "    Could not list NFS 4.1 datastores: $_" -ForegroundColor Yellow
+        $ErrorMsg = $_.Exception.Message
+        Write-Host "    Could not list NFS 4.1 datastores: $ErrorMsg" -ForegroundColor Yellow
     }
 
     Write-Host "  [INFO] Diagnostics complete`n" -ForegroundColor Cyan
@@ -225,32 +230,52 @@ foreach ($VMHost in $VMHosts) {
 
                 # Create arguments for NFS 4.1 mount
                 $MountArgs = $EsxCli.storage.nfs41.add.CreateArgs()
-                $MountArgs.host = $NFSHost
+<#
+                # Display available parameters
+                Write-Host "    [DEBUG] Available parameters for nfs41.add:" -ForegroundColor DarkGray
+                $MountArgs | Get-Member -MemberType Property | ForEach-Object {
+                    Write-Host "      - $($_.Name)" -ForegroundColor DarkGray
+                }
+#>
+                # Set required parameters
+                $MountArgs.hosts = $NFSHost
                 $MountArgs.share = $NFSExportPath
                 $MountArgs.volumename = $DatastoreName
-
-                Write-Host "    [DEBUG] Mount parameters:" -ForegroundColor DarkGray
-                Write-Host "      NFS Host:  $($MountArgs.host)" -ForegroundColor DarkGray
+<#
+                Write-Host "    [DEBUG] Mount parameters being set:" -ForegroundColor DarkGray
+                Write-Host "      NFS Host:  $($MountArgs.hosts)" -ForegroundColor DarkGray
                 Write-Host "      Share:     $($MountArgs.share)" -ForegroundColor DarkGray
                 Write-Host "      Volume:    $($MountArgs.volumename)" -ForegroundColor DarkGray
-
+#>
                 # Add nconnect parameter if supported (vSphere 7.0 U1+)
                 if ($NconnectSessions -gt 1) {
                     try {
                         # Try to set nconnect - may not be supported on all versions
-                        $MountArgs.nconnect = $NconnectSessions
-                        Write-Host "      Nconnect: $($MountArgs.nconnect)" -ForegroundColor DarkGray
+                        $MountArgs.connections = $NconnectSessions
+                        Write-Host "      Nconnect: $($MountArgs.connections)" -ForegroundColor DarkGray
                     } catch {
                         Write-Host "    [WARNING] Nconnect not supported on this ESXi version" -ForegroundColor Yellow
                     }
                 }
-
+<#
+                # Display all argument values before invoking
+                Write-Host "    [DEBUG] All argument values before invoke:" -ForegroundColor DarkGray
+                $MountArgs | Get-Member -MemberType Property | ForEach-Object {
+                    $PropName = $_.Name
+                    $PropValue = $MountArgs.$PropName
+                    if ($null -ne $PropValue -and $PropValue -ne "") {
+                        Write-Host "      $PropName = $PropValue" -ForegroundColor DarkGray
+                    } else {
+                        Write-Host "      $PropName = <null or empty>" -ForegroundColor DarkGray
+                    }
+                }
+#>
                 # Mount the datastore
-                Write-Host "    [DEBUG] Executing mount command..." -ForegroundColor DarkGray
+                Write-Host "    [DEBUG] Executing mount command, please wait..." -ForegroundColor DarkGray
                 $MountResult = $EsxCli.storage.nfs41.add.Invoke($MountArgs)
 
                 # Verify mount succeeded
-                Start-Sleep -Seconds 5
+                Start-Sleep -Seconds 10
                 $VerifyDS = Get-Datastore -Name $DatastoreName -VMHost $VMHost -ErrorAction SilentlyContinue
 
                 if ($VerifyDS) {
@@ -261,7 +286,8 @@ foreach ($VMHost in $VMHosts) {
                 }
             } catch {
                 # Fallback to PowerCLI cmdlet if esxcli fails
-                Write-Host "    [WARNING] esxcli mount failed: $_" -ForegroundColor Yellow
+                $ErrorMsg = $_.Exception.Message
+                Write-Host "    [WARNING] esxcli mount failed: $ErrorMsg" -ForegroundColor Yellow
                 Write-Host "`n    [INFO] Trying PowerCLI New-Datastore method..." -ForegroundColor Gray
 
                 try {
@@ -274,7 +300,8 @@ foreach ($VMHost in $VMHosts) {
 
                     Write-Host "    [OK] Mounted with NFS 4.1 (PowerCLI method)" -ForegroundColor Green
                 } catch {
-                    Write-Host "    [ERROR] PowerCLI mount also failed: $_" -ForegroundColor Red
+                    $ErrorMsg2 = $_.Exception.Message
+                    Write-Host "    [ERROR] PowerCLI mount also failed: $ErrorMsg2" -ForegroundColor Red
                     Write-Host "    [TROUBLESHOOTING] Check:" -ForegroundColor Yellow
                     Write-Host "      1. ESXi version supports NFS 4.1 (6.0+)" -ForegroundColor Yellow
                     Write-Host "      2. NFS 4.1 firewall rule is enabled" -ForegroundColor Yellow
@@ -298,8 +325,9 @@ foreach ($VMHost in $VMHosts) {
 
         $MountedCount++
     } catch {
+        $ErrorMsg = $_.Exception.Message
         Write-Host "    [ERROR] Failed to mount on $($VMHost.Name)" -ForegroundColor Red
-        Write-Host "    [ERROR] Error details: $_" -ForegroundColor Red
+        Write-Host "    [ERROR] Error details: $ErrorMsg" -ForegroundColor Red
         $FailedCount++
     }
 }
@@ -327,7 +355,8 @@ try {
     Write-Host "  Free Space: $([math]::Round($Datastore.FreeSpaceGB, 2)) GB" -ForegroundColor Gray
     Write-Host "  Mounted on: $($DatastoreHosts.Count) hosts" -ForegroundColor Gray
 } catch {
-    Write-Host "[WARNING] Could not verify datastore: $_" -ForegroundColor Yellow
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[WARNING] Could not verify datastore: $ErrorMsg" -ForegroundColor Yellow
 }
 
 # ==============================================================================
