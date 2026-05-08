@@ -1,43 +1,59 @@
 <#
 .SYNOPSIS
-    Mounts an existing NFS export from Pure Storage FlashArray to a vCenter cluster.
+    Mounts an existing NFS export, ideally from an Everpure FlashArray, to a vCenter cluster.
 
 .DESCRIPTION
     This script connects to vCenter and mounts an existing NFS export (from FlashArray or any NFS server)
     to all ESXi hosts in a specified vCenter cluster. It assumes the NFS export already exists.
 
-.PARAMETER DatastoreName
-    Name of the NFS datastore to create in vCenter
+    The credentials for logging into vCenter are stored in an XML file.
+    You will need to create the XML file outside of this PowerShell script.
 
-.PARAMETER NFSExportPath
-    NFS export path (e.g., /datastore-name)
+    Here is a quick way to create the credentials XML file:
+    $vCenterCreds = Get-Credential
+    $vCenterCreds | Export-CliXml -Path "$HOME/Documents/creds/vCenter-creds.xml"
+
+.PARAMETER DatastoreName
+    (Required) Name of the NFS datastore to create in vCenter
 
 .PARAMETER NFSHost
-    FQDN or IP address of the NFS server (FlashArray VIF)
+    (Required) FQDN or IP address of the NFS server (FlashArray VIF)
 
-.PARAMETER vCenterCluster
-    Name of the vCenter cluster to mount the datastore to
-
-.PARAMETER vCenterServer
-    FQDN or IP address of the vCenter Server
+.PARAMETER NFSExportPath
+    (Required) NFS export path (e.g., /datastore-name)
 
 .PARAMETER NFSVersion
-    NFS version to use: 'nfsv3' or 'nfsv4' (default: nfsv3)
+    (Optional) NFS version to use: 'nfsv3' or 'nfsv4' (default: nfsv3)
 
 .PARAMETER NconnectSessions
-    Number of nconnect sessions for NFS 4.1 (default: 4, range: 1-8)
+    (Optional) Number of nconnect sessions for NFS 4.1 (default: 4, range: 1-8)
 
-.PARAMETER vCenterCredPath
-    Path to vCenter credentials XML file
+.PARAMETER vCenterCluster
+    (Required) Name of the vCenter cluster to mount the datastore to
+
+.PARAMETER vCenterServer
+    (Required) FQDN or IP address of the vCenter Server
+
+.PARAMETER vCenterCredsPath
+    (Optional)Path to vCenter credentials XML file (default: $HOME/Documents/creds/vCenter-creds.xml)
 
 .EXAMPLE
-    .\New-NFSv3Datastore.ps1 -DatastoreName "NFS-DS-01" -NFSExportPath "/NFS-DS-01" -NFSHost "array.domain.com" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com"
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-01" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com"
 
 .EXAMPLE
-    .\New-NFSv3Datastore.ps1 -DatastoreName "NFS-DS-02" -NFSExportPath "/NFS-DS-02" -NFSHost "10.0.0.100" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 -NconnectSessions 8
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-02" -NFSHost "10.0.0.100" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 
+
+.EXAMPLE
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-03" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NconnectSessions 8
+
+.EXAMPLE
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-02" -NFSHost "10.0.0.100" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 -NconnectSessions 8
+
+.EXAMPLE 
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-03" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -vCenterCredsPath "$HOME/Documents/creds/vCenter-creds.xml"
 
 .NOTES
-    Author: David Stevens
+    Author: David Stevens - Everpure
     Requires: VMware.PowerCLI, specifically VMware.VimAutomation.Core
 #>
 
@@ -47,17 +63,11 @@ param(
     [string]$DatastoreName,
     
     [Parameter(Mandatory=$true)]
-    [string]$NFSExportPath,
-    
-    [Parameter(Mandatory=$true)]
     [string]$NFSHost,
     
     [Parameter(Mandatory=$true)]
-    [string]$vCenterCluster,
-    
-    [Parameter(Mandatory=$true)]
-    [string]$vCenterServer,
-    
+    [string]$NFSExportPath,
+
     [Parameter(Mandatory=$false)]
     [ValidateSet('nfsv3','nfsv4')]
     [string]$NFSVersion = 'nfsv3',
@@ -65,9 +75,15 @@ param(
     [Parameter(Mandatory=$false)]
     [ValidateRange(1,8)]
     [int]$NconnectSessions = 4,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$vCenterCluster,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$vCenterServer,
 
     [Parameter(Mandatory=$false)]
-    [string]$vCenterCredPath = "$HOME/Documents/creds/vCenter-creds.xml"
+    [string]$vCenterCredsPath = "$HOME/Documents/creds/vCenter-creds.xml"
 )
 
 # ==============================================================================
@@ -95,7 +111,7 @@ try {
 Write-Host "[STEP 1] Connecting to vCenter..." -ForegroundColor Cyan
 
 try {
-    $vCenterCreds = Import-CliXml -Path $vCenterCredPath -ErrorAction Stop
+    $vCenterCreds = Import-CliXml -Path $vCenterCredsPath -ErrorAction Stop
     Connect-VIServer -Server $vCenterServer `
         -Credential $vCenterCreds `
         -ErrorAction Stop | Out-Null

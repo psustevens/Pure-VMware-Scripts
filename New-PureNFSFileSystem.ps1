@@ -1,107 +1,391 @@
+<#
+.SYNOPSIS
+    Creates a new NFS file system on an Everpure FlashArray with associated policy objects.
 
-# Install PowerShell modules
-Import-Module PureStoragePowerShellSDK2
+.DESCRIPTION
+    This script creates a new NFS file system on an Everpure FlashArray with associated
+    NFS export, quota, snapshot, and autodir policies. It does NOT mount the filesystem
+    to vCenter - use New-PureNFSDatastore.ps1 for that.
 
-# FlashArray variables
-$ArrayName        = 'sn1-x90r2-f07-27.fsa.lab'  # FlashArray FQDN
-$FileSystemName   = 'NFSv4-Test'                    # File System Name
-$SnapshotEvery    = 1800000                     # Snapshot every 30 minutes (in ms)
-$SnapshotKeepFor  = 86400000                    # Keep snapshots for 1 day (in ms)
-$NFSversion       = 'nfsv4'                     # Use nfsv41 for NFS version
-$QuotaLimit       = 10TB                        # Quota limit for the file system
+    The credentials for logging into the FlashArray are stored in an XML file.
+    You will need to create the XML file outside of this PowerShell script.
 
-#region Create NFS FileSystem
+    Here is a quick way to create the credentials XML file:
+    $FlashArrayCreds = Get-Credential
+    $FlashArrayCreds | Export-CliXml -Path "$HOME/Documents/creds/FA-creds.xml"
 
-# Connect to our FlashArray
-$FlashArrayCreds = Import-CliXml -Path "$HOME/Documents/creds/FA-creds.xml"
+.PARAMETER FileSystemName
+    (Required) Name of the NFS file system to create on the FlashArray
 
-# Connect to the FlashArray, negotiate highest supported API version on the arrray.
-$FlashArray = Connect-Pfa2Array -EndPoint $ArrayName `
-    -Credential $FlashArrayCreds `
-    -IgnoreCertificateError
-    # -Verbose `
-    # -ApiVersion 2.27
+.PARAMETER FileSystemSize
+    (Required) Size of the file system (e.g., 16TB, 5000GB)
 
-# Create a new file system and capture the result
-$FileSystem = New-Pfa2FileSystem -Array $FlashArray `
-    -Name $FileSystemName
-    # -Verbose
+.PARAMETER FlashArrayEndpoint
+    (Required) FQDN or IP address of the Everpure FlashArray management interface
 
-# Get the name of the root managed directory
-$RootManagedDirectory = Get-Pfa2Directory -Array $FlashArray -FileSystemName $FileSystem.Name
-Write-Host "Created managed directory: $($RootManagedDirectory.Name)" -ForegroundColor Green
-#Write-Host "Path: $($RootManagedDirectory.Path)" -ForegroundColor Green
+.PARAMETER NFSVersion
+    (Optional) NFS version to use: 'nfsv3' or 'nfsv4' (default: nfsv3)
 
-# Create a new NFS export policy
-New-Pfa2PolicyNfs -Array $FlashArray -Name "$($FileSystemName)-export-policy" `
-    -UserMappingEnabled $false `
-    -Enabled $true | Out-Null
-    # -Verbose
+.PARAMETER QuotaEnabled
+    (Optional) Enable quota policy (default: $true)
 
-# Add client rule with no-root-squash for all clients using NFSv3
-New-Pfa2PolicyNfsClientRule -Array $FlashArray `
-    -PolicyName "$($FileSystemName)-export-policy" `
-    -RulesClient '*' `
-    -RulesAccess 'no-root-squash' `
-    -RulesPermission 'rw' `
-    -RulesNfsVersion $NFSversion | Out-Null
-    # -Verbose
+.PARAMETER SnapshotEnabled
+    (Optional)  Enable snapshot policy (default: $true)
 
-# Create a new quota policy
-New-Pfa2PolicyQuota -Array $FlashArray -Name "$($FileSystemName)-quota-policy" -Enabled $true | Out-Null # -Verbose
+.PARAMETER SnapshotRulesEvery
+    (Optional) Snapshot interval in milliseconds (default: 86400000 = 1 day, range: 5 min to 1 year)
 
-# Add quota rule with $QuotaLimit limit (10995116277760 bytes = 10TB)
-New-Pfa2PolicyQuotaRule -Array $FlashArray `
-    -PolicyName "$($FileSystemName)-quota-policy" `
-    -RulesQuotaLimit $QuotaLimit `
-    -RulesEnforced $true | Out-Null
-    # -Verbose
+.PARAMETER SnapshotRulesKeepFor
+    (Optional) Snapshot retention in milliseconds (default: 604800000 = 7 days, range: 5 min to 5 years)
 
-# Create a new autodir policy
-New-Pfa2PolicyAutodir -Array $FlashArray -Name "$($FileSystemName)-autodir-policy" -Enabled $true | Out-Null # -Verbose
+.PARAMETER SnapshotName
+    (Optional) Snapshot name for naming snapshots (default: 'daily')
 
-# Create a new snapshot policy
-New-Pfa2PolicySnapshot -Array $FlashArray -Name "$($FileSystemName)-snapshot-policy" -Enabled $true | Out-Null #-Verbose
+.PARAMETER FlashArrayCredsPath
+    (Optional) Path to FlashArray credentials XML file (default: $HOME/Documents/creds/FA-creds.xml)
 
-# Add snapshot rule with $SnapshotEvery snapshots, retained for $SnapshotKeepFor ms (43200000 ms = 12 hours)
-$SnapshotRule = New-Pfa2PolicySnapshotRule -Array $FlashArray `
-    -PolicyName "$($FileSystemName)-snapshot-policy" `
-    -RulesClientName '30-minute-snapshots' `
-    -RulesEvery $SnapshotEvery `
-    -RulesKeepFor $SnapshotKeepFor `
-    # -Verbose
+.EXAMPLE
+    .\New-PureNFSFileSystem.ps1 -FileSystemName "NFS-FS-01" -FileSystemSize 10TB -NFSVersion nfsv3 -FlashArrayEndpoint "sn1-x90r2-f07-27.fsa.lab"
 
-# Assign the NFS export policy to the file system
-New-Pfa2DirectoryPolicyNfs -Array $FlashArray `
-    -MemberName $RootManagedDirectory.Name `
-    -PolicyName "$($FileSystemName)-export-policy" `
-    -PoliciesExportName "$($FileSystemName)" | Out-Null 
-    # -Verbose
+.EXAMPLE
+    .\New-PureNFSFileSystem.ps1 -FileSystemName "NFS-FS-02" -FileSystemSize 100GB -NFSVersion nfsv4 -FlashArrayEndpoint "sn1-x90r2-f07-27.fsa.lab"
 
-# After assigning the export, retrieve it to display details
-$NFSExport = Get-Pfa2DirectoryExport -Array $FlashArray `
-    -DirectoryName $RootManagedDirectory.Name 
+.EXAMPLE
+    .\New-PureNFSFileSystem.ps1 -FileSystemName "NFS-FS-03" -FileSystemSize 2TB -NFSVersion nfsv3 -FlashArrayEndpoint "sn1-x90r2-f07-27.fsa.lab" -SnapshotRulesEvery 3600000 -SnapshotRulesKeepFor 86400000 -SnapshotName "hourly"
 
-# Assign the quota policy to the file system
-New-Pfa2DirectoryPolicyQuota -Array $FlashArray `
-    -MemberName $RootManagedDirectory.Name `
-    -PolicyName "$($FileSystemName)-quota-policy" | Out-Null
-    # -Verbose
+.NOTES
 
-# Assign the autodir policy to the file system
-New-Pfa2DirectoryPolicyAutodir -Array $FlashArray `
-    -MemberName $RootManagedDirectory.Name `
-    -PolicyName "$($FileSystemName)-autodir-policy" | Out-Null
-    # -Verbose
+    Common Snapshot Time Values (in milliseconds):
+    - 5 minutes   = 300000
+    - 15 minutes  = 900000
+    - 30 minutes  = 1800000
+    - 1 hour      = 3600000
+    - 6 hours     = 21600000
+    - 12 hours    = 43200000
+    - 1 day       = 86400000
+    - 7 days      = 604800000
+    - 30 days     = 2592000000
+    - 1 year      = 31536000000
 
-# Assign the snapshot policy to the file system
-New-Pfa2DirectoryPolicySnapshot -Array $FlashArray `
-    -MemberName $RootManagedDirectory.Name `
-    -PolicyName "$($FileSystemName)-snapshot-policy" | Out-Null
-    # -Verbose
+    Author: David Stevens - Everpure
+    Requires: PureStoragePowerShellSDK2
+#>
 
-Write-Host "Created File System: $($FileSystem.Name)" -ForegroundColor Green
-Write-Host "Created NFS export:  $($NFSExport.Path)$($FileSystem.Name)" -ForegroundColor Green
-#Write-Host "A $($QuotaLimit) quota limit was applied." -ForegroundColor Green
-#Write-host "Snapshot policy was applied with $($SnapshotEvery) ms snapshots, retained for $($SnapshotKeepFor) ms days." -ForegroundColor Green
-#endregion
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$FileSystemName,
+    
+    [Parameter(Mandatory=$true)]
+    [ValidatePattern('^\d+[KMGTP]B$')]
+    [string]$FileSystemSize,
+
+    [Parameter(Mandatory=$true)]
+    [string]$FlashArrayEndpoint,
+    
+    [Parameter(Mandatory=$false)]
+    [ValidateSet('nfsv3','nfsv4')]
+    [string]$NFSVersion = 'nfsv3',
+    
+    [Parameter(Mandatory=$false)]
+    [bool]$QuotaEnabled = $true,
+
+    [Parameter(Mandatory=$false)]
+    [bool]$SnapshotEnabled = $true,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(300000, 31536000000)]
+    [int64]$SnapshotRulesEvery = 86400000,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(300000, 157680000000)]
+    [int64]$SnapshotRulesKeepFor = 604800000,
+
+    [Parameter(Mandatory=$false)]
+    [string]$SnapshotName = 'daily',
+
+    [Parameter(Mandatory=$false)]
+    [string]$FlashArrayCredsPath = "$HOME/Documents/creds/FA-creds.xml"
+)
+
+# ==============================================================================
+# 1. LOAD MODULES AND VALIDATE
+# ==============================================================================
+
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "Everpure NFS File System Creation Script" -ForegroundColor Cyan
+Write-Host "========================================`n" -ForegroundColor Cyan
+
+# Import required module
+try {
+    Import-Module PureStoragePowerShellSDK2 -ErrorAction Stop
+    Write-Host "[OK] Module loaded successfully" -ForegroundColor Green
+} catch {
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to load required module: $ErrorMsg" -ForegroundColor Red
+    exit 1
+}
+
+# Convert size to bytes for quota
+$SizeInBytes = switch -Regex ($FileSystemSize) {
+    '(\d+)KB$' { [int64]$matches[1] * 1KB }
+    '(\d+)MB$' { [int64]$matches[1] * 1MB }
+    '(\d+)GB$' { [int64]$matches[1] * 1GB }
+    '(\d+)TB$' { [int64]$matches[1] * 1TB }
+    '(\d+)PB$' { [int64]$matches[1] * 1PB }
+}
+
+Write-Host "[INFO] File System Name: $FileSystemName" -ForegroundColor Yellow
+Write-Host "[INFO] File System Size: $FileSystemSize ($SizeInBytes bytes)" -ForegroundColor Yellow
+Write-Host "[INFO] NFS Version: $NFSVersion" -ForegroundColor Yellow
+
+# ==============================================================================
+# 2. CONNECT TO FLASHARRAY
+# ==============================================================================
+
+Write-Host "`n[STEP 1] Connecting to FlashArray..." -ForegroundColor Cyan
+
+try {
+    $FlashArrayCreds = Import-CliXml -Path $FlashArrayCredsPath -ErrorAction Stop
+    $FlashArray = Connect-Pfa2Array -EndPoint $FlashArrayEndpoint `
+        -Credential $FlashArrayCreds `
+        -IgnoreCertificateError `
+        -ErrorAction Stop
+    Write-Host "[OK] Connected to FlashArray: $FlashArrayEndpoint" -ForegroundColor Green
+} catch {
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to connect to FlashArray: $ErrorMsg" -ForegroundColor Red
+    exit 1
+}
+
+# ==============================================================================
+# 3. CREATE FILE SYSTEM ON FLASHARRAY
+# ==============================================================================
+
+Write-Host "`n[STEP 2] Creating NFS file system on FlashArray..." -ForegroundColor Cyan
+
+try {
+    # Create the file system
+    $FileSystem = New-Pfa2FileSystem -Array $FlashArray -Name $FileSystemName -ErrorAction Stop
+    Write-Host "[OK] File system created: $($FileSystem.Name)" -ForegroundColor Green
+
+    # Get the root managed directory
+    $RootManagedDirectory = Get-Pfa2Directory -Array $FlashArray -FileSystemName $FileSystem.Name -ErrorAction Stop
+    Write-Host "[OK] Managed directory: $($RootManagedDirectory.Name)" -ForegroundColor Green
+} catch {
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to create file system: $ErrorMsg" -ForegroundColor Red
+    Disconnect-Pfa2Array -Array $FlashArray
+    exit 1
+}
+
+# ==============================================================================
+# 4. CREATE AND ASSIGN NFS EXPORT POLICY
+# ==============================================================================
+
+Write-Host "`n[STEP 3] Creating NFS export policy..." -ForegroundColor Cyan
+
+try {
+    # Create NFS export policy
+    New-Pfa2PolicyNfs -Array $FlashArray `
+        -Name "$($FileSystemName)-export-policy" `
+        -UserMappingEnabled $false `
+        -Enabled $true `
+        -ErrorAction Stop | Out-Null
+
+    # Add client rule with no-root-squash for all clients
+    New-Pfa2PolicyNfsClientRule -Array $FlashArray `
+        -PolicyName "$($FileSystemName)-export-policy" `
+        -RulesClient '*' `
+        -RulesAccess 'no-root-squash' `
+        -RulesPermission 'rw' `
+        -RulesNfsVersion $NFSVersion `
+        -ErrorAction Stop | Out-Null
+
+    # Assign NFS export policy to the file system
+    New-Pfa2DirectoryPolicyNfs -Array $FlashArray `
+        -MemberName $RootManagedDirectory.Name `
+        -PolicyName "$($FileSystemName)-export-policy" `
+        -PoliciesExportName "$($FileSystemName)" `
+        -ErrorAction Stop | Out-Null
+
+    Write-Host "[OK] NFS export policy created and assigned" -ForegroundColor Green
+} catch {
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to create NFS export policy: $ErrorMsg" -ForegroundColor Red
+    Disconnect-Pfa2Array -Array $FlashArray
+    exit 1
+}
+
+# ==============================================================================
+# 5. CREATE AND ASSIGN QUOTA POLICY (OPTIONAL)
+# ==============================================================================
+
+if ($QuotaEnabled) {
+    Write-Host "`n[STEP 4] Creating quota policy..." -ForegroundColor Cyan
+
+    try {
+        # Create quota policy
+        New-Pfa2PolicyQuota -Array $FlashArray `
+            -Name "$($FileSystemName)-quota-policy" `
+            -Enabled $true `
+            -ErrorAction Stop | Out-Null
+
+        # Add quota rule
+        New-Pfa2PolicyQuotaRule -Array $FlashArray `
+            -PolicyName "$($FileSystemName)-quota-policy" `
+            -RulesQuotaLimit $SizeInBytes `
+            -RulesEnforced $true `
+            -ErrorAction Stop | Out-Null
+
+        # Assign quota policy to the file system
+        New-Pfa2DirectoryPolicyQuota -Array $FlashArray `
+            -MemberName $RootManagedDirectory.Name `
+            -PolicyName "$($FileSystemName)-quota-policy" `
+            -ErrorAction Stop | Out-Null
+
+        Write-Host "[OK] Quota policy created and assigned ($FileSystemSize)" -ForegroundColor Green
+    } catch {
+        $ErrorMsg = $_.Exception.Message
+        Write-Host "[WARNING] Failed to create quota policy: $ErrorMsg" -ForegroundColor Yellow
+    }
+}
+
+# ==============================================================================
+# 6. CREATE AND ASSIGN SNAPSHOT POLICY (OPTIONAL)
+# ==============================================================================
+
+if ($SnapshotEnabled) {
+    Write-Host "`n[STEP 5] Creating snapshot policy..." -ForegroundColor Cyan
+
+    # Calculate human-readable time values
+    $EveryHours = [math]::Round($SnapshotRulesEvery / 3600000, 2)
+    $EveryDays = [math]::Round($SnapshotRulesEvery / 86400000, 2)
+    $KeepForHours = [math]::Round($SnapshotRulesKeepFor / 3600000, 2)
+    $KeepForDays = [math]::Round($SnapshotRulesKeepFor / 86400000, 2)
+
+    try {
+        # Create snapshot policy
+        New-Pfa2PolicySnapshot -Array $FlashArray `
+            -Name "$($FileSystemName)-snapshot-policy" `
+            -Enabled $true `
+            -ErrorAction Stop | Out-Null
+
+        # Add snapshot rule with user-specified parameters
+        New-Pfa2PolicySnapshotRule -Array $FlashArray `
+            -PolicyName "$($FileSystemName)-snapshot-policy" `
+            -RulesClientName $SnapshotName `
+            -RulesEvery $SnapshotRulesEvery `
+            -RulesKeepFor $SnapshotRulesKeepFor `
+            -ErrorAction Stop | Out-Null
+
+        # Assign snapshot policy to the file system
+        New-Pfa2DirectoryPolicySnapshot -Array $FlashArray `
+            -MemberName $RootManagedDirectory.Name `
+            -PolicyName "$($FileSystemName)-snapshot-policy" `
+            -ErrorAction Stop | Out-Null
+
+        # Display human-readable snapshot schedule
+        if ($EveryDays -ge 1) {
+            $EveryText = "$EveryDays days"
+        } else {
+            $EveryText = "$EveryHours hours"
+        }
+
+        if ($KeepForDays -ge 1) {
+            $KeepForText = "$KeepForDays days"
+        } else {
+            $KeepForText = "$KeepForHours hours"
+        }
+
+        Write-Host "[OK] Snapshot policy created and assigned" -ForegroundColor Green
+        Write-Host "    Snapshot Name: $SnapshotName" -ForegroundColor Gray
+        Write-Host "       Interval: Every $EveryText" -ForegroundColor Gray
+        Write-Host "      Retention: $KeepForText" -ForegroundColor Gray
+    } catch {
+        $ErrorMsg = $_.Exception.Message
+        Write-Host "[WARNING] Failed to create snapshot policy: $ErrorMsg" -ForegroundColor Yellow
+    }
+}
+
+# ==============================================================================
+# 7. CREATE AND ASSIGN AUTODIR POLICY
+# ==============================================================================
+
+Write-Host "`n[STEP 6] Creating autodir policy..." -ForegroundColor Cyan
+
+try {
+    # Create autodir policy
+    New-Pfa2PolicyAutodir -Array $FlashArray `
+        -Name "$($FileSystemName)-autodir-policy" `
+        -Enabled $true `
+        -ErrorAction Stop | Out-Null
+
+    # Assign autodir policy to the file system
+    New-Pfa2DirectoryPolicyAutodir -Array $FlashArray `
+        -MemberName $RootManagedDirectory.Name `
+        -PolicyName "$($FileSystemName)-autodir-policy" `
+        -ErrorAction Stop | Out-Null
+
+    Write-Host "[OK] Autodir policy created and assigned" -ForegroundColor Green
+} catch {
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[WARNING] Failed to create autodir policy: $ErrorMsg" -ForegroundColor Yellow
+}
+
+# ==============================================================================
+# 8. GET NFS EXPORT PATH
+# ==============================================================================
+
+Write-Host "`n[STEP 7] Retrieving NFS export path..." -ForegroundColor Cyan
+
+try {
+    $NFSExport = Get-Pfa2DirectoryExport -Array $FlashArray `
+        -DirectoryName $RootManagedDirectory.Name `
+        -ErrorAction Stop
+
+    # Get the actual export path from the FlashArray
+    # For NFS 3, use the export name; for NFS 4.1, use the full path
+    if ($NFSVersion -eq 'nfsv4') {
+        # NFS 4.1 requires the full path from the FlashArray
+        $NFSExportPath = $NFSExport.Path
+        if (-not $NFSExportPath) {
+            # Fallback to constructed path
+            $NFSExportPath = "/$($FileSystemName)"
+        }
+    } else {
+        # NFS 3 uses the export name
+        $NFSExportPath = "/$($FileSystemName)"
+    }
+
+    Write-Host "[OK] NFS export path: $NFSExportPath" -ForegroundColor Green
+} catch {
+    $ErrorMsg = $_.Exception.Message
+    Write-Host "[ERROR] Failed to retrieve NFS export path: $ErrorMsg" -ForegroundColor Red
+    Disconnect-Pfa2Array -Array $FlashArray
+    exit 1
+}
+
+# ==============================================================================
+# 9. CLEANUP AND SUMMARY
+# ==============================================================================
+
+Write-Host "`n[STEP 8] Disconnecting from FlashArray..." -ForegroundColor Cyan
+Disconnect-Pfa2Array -Array $FlashArray
+Write-Host "[OK] Disconnected from FlashArray" -ForegroundColor Green
+
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "FILE SYSTEM CREATION COMPLETE" -ForegroundColor Cyan
+Write-Host "========================================`n" -ForegroundColor Cyan
+
+Write-Host "[SUMMARY]" -ForegroundColor Green
+Write-Host "  File System Name: $FileSystemName" -ForegroundColor Gray
+Write-Host "  File System Size: $FileSystemSize" -ForegroundColor Gray
+Write-Host "  NFS Version: $NFSVersion" -ForegroundColor Gray
+Write-Host "  NFS Export Path: $NFSExportPath" -ForegroundColor Gray
+Write-Host "  FlashArray: $FlashArrayEndpoint" -ForegroundColor Gray
+Write-Host "`n[NEXT STEPS]" -ForegroundColor Yellow
+Write-Host "  To mount this filesystem to vCenter, use:" -ForegroundColor Gray
+Write-Host "    .\\New-PureNFSDatastore.ps1 -DatastoreName '$FileSystemName' -NFSExportPath '$NFSExportPath' -NFSHost '<NFS_VIF_IP>' -vCenterCluster '<cluster>' -vCenterServer '<vcenter>'" -ForegroundColor Gray
+Write-Host ""
+

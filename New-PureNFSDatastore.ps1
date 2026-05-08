@@ -1,31 +1,40 @@
 <#
 .SYNOPSIS
-    Creates a new NFS datastore on Pure Storage FlashArray and mounts it to a vCenter cluster.
+    Creates a new NFS datastore on an Everpure FlashArray and mounts it to a vCenter cluster.
 
 .DESCRIPTION
-    This script creates a complete NFS file system on a Pure Storage FlashArray with policies,
+    This script creates a new NFS file system on an Everpure FlashArray with associated policies,
     then mounts it as an NFS datastore to all ESXi hosts in a specified vCenter cluster.
 
 .PARAMETER DatastoreName
-    Name of the NFS datastore to create
+    Name of the NFS datastore to create in vCenter
 
 .PARAMETER DatastoreSize
     Size of the datastore (e.g., 10TB, 5000GB)
 
+.PARAMETER FlashArrayEndpoint
+    FQDN or IP address of the Everpure FlashArray management interface
+
+.PARAMETER FlashArrayCredPath
+    Path to FlashArray credentials XML file
+
 .PARAMETER NFSVersion
     NFS version to use: 'nfsv3' or 'nfsv4' (default: nfsv3)
 
-.PARAMETER vCenterCluster
-    Name of the vCenter cluster to mount the datastore to
+.PARAMETER NFSHost
+    FQDN or IP address of the NFS server (FlashArray VIF)
 
 .PARAMETER NconnectSessions
-    Number of nconnect sessions for NFS 4.1 (default: 4, range: 1-16)
-
-.PARAMETER FlashArrayEndpoint
-    FQDN or IP address of the Pure Storage FlashArray
+    Number of nconnect sessions for NFS 4.1 (default: 4, range: 1-8)
 
 .PARAMETER vCenterServer
     FQDN or IP address of the vCenter Server
+
+.PARAMETER vCenterCredPath
+    Path to vCenter credentials XML file
+
+.PARAMETER vCenterCluster
+    Name of the vCenter cluster to mount the datastore to
 
 .PARAMETER QuotaEnabled
     Enable quota policy (default: $true)
@@ -43,17 +52,15 @@
     Snapshot client name for naming snapshots (default: 'daily')
 
 .EXAMPLE
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-Datastore-01" -DatastoreSize 10TB -NFSVersion nfsv3 -vCenterCluster "Cluster01" -FlashArrayEndpoint "array.domain.com" -vCenterServer "vcenter.domain.com"
+    .\New-PureNFSDatastore.ps1 -DatastoreName "NFS-Datastore-01" -DatastoreSize 10TB -NFSVersion nfsv3 -vCenterCluster "Cluster01" -FlashArrayEndpoint "array.domain.com" -vCenterServer "vcenter.domain.com"
 
 .EXAMPLE
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-Datastore-02" -DatastoreSize 5TB -NFSVersion nfsv4 -vCenterCluster "Cluster02" -NconnectSessions 8 -FlashArrayEndpoint "array.domain.com" -vCenterServer "vcenter.domain.com"
+    .\New-PureNFSDatastore.ps1 -DatastoreName "NFS-Datastore-02" -DatastoreSize 100GB -NFSVersion nfsv4 -vCenterCluster "Cluster02" -NconnectSessions 8 -FlashArrayEndpoint "array.domain.com" -vCenterServer "vcenter.domain.com"
 
 .EXAMPLE
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-Datastore-03" -DatastoreSize 2TB -NFSVersion nfsv3 -vCenterCluster "Cluster01" -FlashArrayEndpoint "array.domain.com" -vCenterServer "vcenter.domain.com" -SnapshotRulesEvery 3600000 -SnapshotRulesKeepFor 86400000 -SnapshotClientName "hourly"
+    .\New-PureNFSDatastore.ps1 -DatastoreName "NFS-Datastore-03" -DatastoreSize 2TB -NFSVersion nfsv3 -vCenterCluster "Cluster01" -FlashArrayEndpoint "array.domain.com" -vCenterServer "vcenter.domain.com" -SnapshotRulesEvery 3600000 -SnapshotRulesKeepFor 86400000 -SnapshotClientName "hourly"
 
 .NOTES
-    Author: David Stevens
-    Requires: VMware.PowerCLI, PureStoragePowerShellSDK2
 
     Common Snapshot Time Values (in milliseconds):
     - 5 minutes   = 300000
@@ -66,6 +73,9 @@
     - 7 days      = 604800000
     - 30 days     = 2592000000
     - 1 year      = 31536000000
+
+    Author: David Stevens - Everpure
+    Requires: PureStoragePowerShellSDK2, VMware.PowerCLI specifically VMware.VimAutomation.Core
 #>
 
 [CmdletBinding()]
@@ -80,6 +90,9 @@ param(
     [Parameter(Mandatory=$false)]
     [ValidateSet('nfsv3','nfsv4')]
     [string]$NFSVersion = 'nfsv3',
+
+    [Parameter(Mandatory=$true)]
+    [string]$NFSHost,
     
     [Parameter(Mandatory=$true)]
     [string]$vCenterCluster,
@@ -310,8 +323,8 @@ if ($SnapshotEnabled) {
 
         Write-Host "[OK] Snapshot policy created and assigned" -ForegroundColor Green
         Write-Host "    Client Name: $SnapshotClientName" -ForegroundColor Gray
-        Write-Host "    Interval: Every $EveryText" -ForegroundColor Gray
-        Write-Host "    Retention: $KeepForText" -ForegroundColor Gray
+        Write-Host "       Interval: Every $EveryText" -ForegroundColor Gray
+        Write-Host "      Retention: $KeepForText" -ForegroundColor Gray
     } catch {
         Write-Host "[WARNING] Failed to create snapshot policy: $_" -ForegroundColor Yellow
     }
