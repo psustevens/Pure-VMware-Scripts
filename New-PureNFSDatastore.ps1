@@ -6,6 +6,13 @@
     This script creates a new NFS file system on an Everpure FlashArray with associated policies,
     then mounts it as an NFS datastore to all ESXi hosts in a specified vCenter cluster.
 
+    The credentials for logging into the FlashArray are stored in an XML file.
+    You will need to create the XML file outside of this PowerShell script.
+
+    Here is a quick way to create the credentials XML file:
+    $FlashArrayCreds = Get-Credential
+    $FlashArrayCreds | Export-CliXml -Path "$HOME/Documents/creds/FA-creds.xml"
+
 .PARAMETER DatastoreName
     Name of the NFS datastore to create in vCenter
 
@@ -139,7 +146,9 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "NFS Datastore Creation Script" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-# Import required modules
+# Both modules are required: VimAutomation.Core for all vCenter/ESXi cmdlets
+# (Connect-VIServer, Get-Cluster, New-Datastore, etc.) and PureStoragePowerShellSDK2
+# for all FlashArray Pfa2* cmdlets (Connect-Pfa2Array, New-Pfa2FileSystem, etc.)
 try {
     Import-Module VMware.VimAutomation.Core -ErrorAction Stop
     Import-Module PureStoragePowerShellSDK2 -ErrorAction Stop
@@ -149,7 +158,9 @@ try {
     exit 1
 }
 
-# Convert size to bytes for quota
+# The FlashArray quota API requires size in raw bytes; convert the human-readable
+# input (e.g., "10TB") by extracting the numeric part and multiplying by the
+# appropriate PowerShell unit constant
 $SizeInBytes = switch -Regex ($DatastoreSize) {
     '(\d+)KB$' { [int64]$matches[1] * 1KB }
     '(\d+)MB$' { [int64]$matches[1] * 1MB }
@@ -173,7 +184,12 @@ if ($NFSVersion -eq 'nfsv4') {
 Write-Host "`n[STEP 1] Connecting to FlashArray..." -ForegroundColor Cyan
 
 try {
+    # Credentials are loaded from an encrypted XML file rather than hardcoded to
+    # avoid exposing passwords in source control or script history
     $FlashArrayCreds = Import-CliXml -Path $FlashArrayCredPath -ErrorAction Stop
+
+    # -IgnoreCertificateError allows connections to arrays using self-signed certs,
+    # which is common in lab and non-production environments
     $FlashArray = Connect-Pfa2Array -EndPoint $FlashArrayEndpoint `
         -Credential $FlashArrayCreds `
         -IgnoreCertificateError `
@@ -191,11 +207,15 @@ try {
 Write-Host "`n[STEP 2] Creating NFS file system on FlashArray..." -ForegroundColor Cyan
 
 try {
-    # Create the file system
+    # Creates the FlashArray file system object — the storage container that
+    # will be exported via NFS and become the vCenter datastore
     $FileSystem = New-Pfa2FileSystem -Array $FlashArray -Name $DatastoreName -ErrorAction Stop
     Write-Host "[OK] File system created: $($FileSystem.Name)" -ForegroundColor Green
 
-    # Get the root managed directory
+    # A FlashArray file system exposes its contents through a "managed directory"
+    # (the root directory of the file system). All policies — NFS export, quota,
+    # snapshot, autodir — are attached to this directory object, not the file
+    # system itself
     $RootManagedDirectory = Get-Pfa2Directory -Array $FlashArray -FileSystemName $FileSystem.Name -ErrorAction Stop
     Write-Host "[OK] Managed directory: $($RootManagedDirectory.Name)" -ForegroundColor Green
 } catch {
@@ -211,14 +231,19 @@ try {
 Write-Host "`n[STEP 3] Creating NFS export policy..." -ForegroundColor Cyan
 
 try {
-    # Create NFS export policy
+    # Creates an NFS export policy that controls how the file system is shared.
+    # UserMappingEnabled $false disables UID/GID mapping from LDAP/AD — appropriate
+    # for VMware datastores where only the ESXi host kernel (UID 0) accesses the share
     New-Pfa2PolicyNfs -Array $FlashArray `
         -Name "$($DatastoreName)-export-policy" `
         -UserMappingEnabled $false `
         -Enabled $true `
         -ErrorAction Stop | Out-Null
 
-    # Add client rule with no-root-squash for all clients
+    # Adds a client rule allowing ALL hosts (*) with read-write access.
+    # 'no-root-squash' preserves root privileges — required because ESXi mounts
+    # NFS datastores as UID 0; squashing root would block all datastore I/O.
+    # Restrict RulesClient to specific IPs or subnets in security-sensitive environments
     New-Pfa2PolicyNfsClientRule -Array $FlashArray `
         -PolicyName "$($DatastoreName)-export-policy" `
         -RulesClient '*' `
@@ -227,7 +252,9 @@ try {
         -RulesNfsVersion $NFSVersion `
         -ErrorAction Stop | Out-Null
 
-    # Assign NFS export policy to the file system
+    # Binds the export policy to the managed directory and sets the export name,
+    # which becomes the last path component of the NFS mount path on the VIF
+    # (e.g., mounting /DatastoreName from the FlashArray NFS IP)
     New-Pfa2DirectoryPolicyNfs -Array $FlashArray `
         -MemberName $RootManagedDirectory.Name `
         -PolicyName "$($DatastoreName)-export-policy" `
@@ -249,20 +276,24 @@ if ($QuotaEnabled) {
     Write-Host "`n[STEP 4] Creating quota policy..." -ForegroundColor Cyan
 
     try {
-        # Create quota policy
+        # Creates the quota policy container
         New-Pfa2PolicyQuota -Array $FlashArray `
             -Name "$($DatastoreName)-quota-policy" `
             -Enabled $true `
             -ErrorAction Stop | Out-Null
 
-        # Add quota rule
+        # Sets a hard capacity limit equal to the requested datastore size so
+        # writes are rejected once the directory reaches $SizeInBytes.
+        # RulesEnforced $true makes this a hard limit (writes fail at the cap)
+        # rather than a soft advisory notification
         New-Pfa2PolicyQuotaRule -Array $FlashArray `
             -PolicyName "$($DatastoreName)-quota-policy" `
             -RulesQuotaLimit $SizeInBytes `
             -RulesEnforced $true `
             -ErrorAction Stop | Out-Null
 
-        # Assign quota policy to the file system
+        # Attaches the quota policy to the managed directory so the limit
+        # applies to all data written under the NFS export
         New-Pfa2DirectoryPolicyQuota -Array $FlashArray `
             -MemberName $RootManagedDirectory.Name `
             -PolicyName "$($DatastoreName)-quota-policy" `
@@ -270,6 +301,7 @@ if ($QuotaEnabled) {
 
         Write-Host "[OK] Quota policy created and assigned ($DatastoreSize)" -ForegroundColor Green
     } catch {
+        # Quota failure is non-fatal; the datastore is still usable without it
         Write-Host "[WARNING] Failed to create quota policy: $_" -ForegroundColor Yellow
     }
 }
@@ -281,20 +313,24 @@ if ($QuotaEnabled) {
 if ($SnapshotEnabled) {
     Write-Host "`n[STEP 5] Creating snapshot policy..." -ForegroundColor Cyan
 
-    # Calculate human-readable time values
+    # Convert millisecond values to hours and days for the human-readable summary
+    # printed at the end — the API only accepts milliseconds
     $EveryHours = [math]::Round($SnapshotRulesEvery / 3600000, 2)
     $EveryDays = [math]::Round($SnapshotRulesEvery / 86400000, 2)
     $KeepForHours = [math]::Round($SnapshotRulesKeepFor / 3600000, 2)
     $KeepForDays = [math]::Round($SnapshotRulesKeepFor / 86400000, 2)
 
     try {
-        # Create snapshot policy
+        # Creates the snapshot policy container
         New-Pfa2PolicySnapshot -Array $FlashArray `
             -Name "$($DatastoreName)-snapshot-policy" `
             -Enabled $true `
             -ErrorAction Stop | Out-Null
 
-        # Add snapshot rule with user-specified parameters
+        # Adds a schedule rule:
+        #   RulesClientName  — label embedded in each snapshot name (e.g., "daily")
+        #   RulesEvery       — how often to take a snapshot (milliseconds)
+        #   RulesKeepFor     — how long to retain each snapshot before auto-deletion (milliseconds)
         New-Pfa2PolicySnapshotRule -Array $FlashArray `
             -PolicyName "$($DatastoreName)-snapshot-policy" `
             -RulesClientName $SnapshotClientName `
@@ -302,13 +338,14 @@ if ($SnapshotEnabled) {
             -RulesKeepFor $SnapshotRulesKeepFor `
             -ErrorAction Stop | Out-Null
 
-        # Assign snapshot policy to the file system
+        # Attaches the snapshot policy to the managed directory so automatic
+        # snapshots are taken of the NFS export on the defined schedule
         New-Pfa2DirectoryPolicySnapshot -Array $FlashArray `
             -MemberName $RootManagedDirectory.Name `
             -PolicyName "$($DatastoreName)-snapshot-policy" `
             -ErrorAction Stop | Out-Null
 
-        # Display human-readable snapshot schedule
+        # Choose the most readable unit (days if >= 1 day, otherwise hours)
         if ($EveryDays -ge 1) {
             $EveryText = "$EveryDays days"
         } else {
@@ -326,6 +363,7 @@ if ($SnapshotEnabled) {
         Write-Host "       Interval: Every $EveryText" -ForegroundColor Gray
         Write-Host "      Retention: $KeepForText" -ForegroundColor Gray
     } catch {
+        # Snapshot failure is non-fatal; the datastore is still usable without it
         Write-Host "[WARNING] Failed to create snapshot policy: $_" -ForegroundColor Yellow
     }
 }
@@ -337,13 +375,16 @@ if ($SnapshotEnabled) {
 Write-Host "`n[STEP 6] Creating autodir policy..." -ForegroundColor Cyan
 
 try {
-    # Create autodir policy
+    # An autodir policy automatically creates subdirectories when a client accesses
+    # a path that doesn't yet exist, eliminating the need to pre-create directories
+    # before mounting — useful for multi-tenant or dynamically provisioned shares
     New-Pfa2PolicyAutodir -Array $FlashArray `
         -Name "$($DatastoreName)-autodir-policy" `
         -Enabled $true `
         -ErrorAction Stop | Out-Null
 
-    # Assign autodir policy to the file system
+    # Attaches the autodir policy to the managed directory so on-demand
+    # subdirectory creation applies to the entire NFS export tree
     New-Pfa2DirectoryPolicyAutodir -Array $FlashArray `
         -MemberName $RootManagedDirectory.Name `
         -PolicyName "$($DatastoreName)-autodir-policy" `
@@ -351,6 +392,7 @@ try {
 
     Write-Host "[OK] Autodir policy created and assigned" -ForegroundColor Green
 } catch {
+    # Autodir failure is non-fatal; the datastore is still accessible without it
     Write-Host "[WARNING] Failed to create autodir policy: $_" -ForegroundColor Yellow
 }
 
@@ -361,21 +403,22 @@ try {
 Write-Host "`n[STEP 7] Retrieving NFS export path..." -ForegroundColor Cyan
 
 try {
+    # Retrieves the export object created when the NFS policy was assigned; it
+    # contains the resolved mount path as reported by the FlashArray
     $NFSExport = Get-Pfa2DirectoryExport -Array $FlashArray `
         -DirectoryName $RootManagedDirectory.Name `
         -ErrorAction Stop
 
-    # Get the actual export path from the FlashArray
-    # For NFS 3, use the export name; for NFS 4.1, use the full path
+    # NFSv4 and NFSv3 use different path conventions on FlashArray:
+    #   NFSv4: clients mount using the full pseudo-root path returned by the array
+    #   NFSv3: clients mount using just the export name as a top-level path
+    # The constructed fallback is used if the array doesn't populate .Path
     if ($NFSVersion -eq 'nfsv4') {
-        # NFS 4.1 requires the full path from the FlashArray
         $NFSExportPath = $NFSExport.Path
         if (-not $NFSExportPath) {
-            # Fallback to constructed path
             $NFSExportPath = "/$($DatastoreName)"
         }
     } else {
-        # NFS 3 uses the export name
         $NFSExportPath = "/$($DatastoreName)"
     }
 
@@ -394,15 +437,21 @@ try {
 Write-Host "`n[STEP 8] Connecting to vCenter..." -ForegroundColor Cyan
 
 try {
+    # vCenter credentials are also stored in an encrypted XML file, separate
+    # from the FlashArray credentials, to allow independent credential rotation
     $vCenterCreds = Import-CliXml -Path $vCenterCredPath -ErrorAction Stop
+
+    # Out-Null suppresses the VIServer connection object that PowerCLI prints
+    # by default, keeping console output clean
     Connect-VIServer -Server $vCenterServer `
         -Credential $vCenterCreds `
         -ErrorAction Stop | Out-Null
     Write-Host "[OK] Connected to vCenter: $vCenterServer" -ForegroundColor Green
 } catch {
     Write-Host "[ERROR] Failed to connect to vCenter: $_" -ForegroundColor Red
+    # Disconnect FlashArray before exiting — the file system was already created
+    # above and does not need to be rolled back, but the session should be closed
     Disconnect-Pfa2Array -Array $FlashArray
-    Write-Host "[OK] Connected to vCenter: $vCenterServer" -ForegroundColor Green
     exit 1
 }
 
@@ -413,10 +462,13 @@ try {
 Write-Host "`n[STEP 9] Validating vCenter cluster..." -ForegroundColor Cyan
 
 try {
+    # Validate the cluster name before iterating hosts — fail fast here rather
+    # than discovering a bad cluster name after attempting mounts on zero hosts
     $Cluster = Get-Cluster -Name $vCenterCluster -ErrorAction Stop
     Write-Host "[OK] Found cluster: $($Cluster.Name)" -ForegroundColor Green
 } catch {
     Write-Host "[ERROR] Cluster '$vCenterCluster' not found: $_" -ForegroundColor Red
+    # Disconnect both sessions before exiting to avoid orphaned connections
     Disconnect-VIServer -Server $vCenterServer -Confirm:$false
     Disconnect-Pfa2Array -Array $FlashArray
     exit 1
@@ -429,10 +481,12 @@ try {
 if ($NFSVersion -eq 'nfsv4') {
     Write-Host "`n[DIAGNOSTICS] Running NFS 4.1 pre-mount checks..." -ForegroundColor Cyan
 
-    # Get first host for diagnostics
+    # Use one representative host for pre-flight checks — we assume the cluster
+    # is homogeneous; one host is enough to surface version or firewall issues
     $DiagHost = Get-Cluster -Name $vCenterCluster | Get-VMHost | Select-Object -First 1
 
-    # Check ESXi version
+    # NFS 4.1 requires vSphere 6.0+; nconnect requires 7.0 U1+.
+    # Warn early so the operator can abort before attempting mounts that will fail
     Write-Host "  [CHECK] ESXi Version:" -ForegroundColor Gray
     Write-Host "    Host: $($DiagHost.Name)" -ForegroundColor Gray
     Write-Host "    Version: $($DiagHost.Version)" -ForegroundColor Gray
@@ -446,7 +500,8 @@ if ($NFSVersion -eq 'nfsv4') {
         Write-Host "    [WARNING] Nconnect requires vSphere 7.0 U1 or later" -ForegroundColor Yellow
     }
 
-    # Check NFS firewall rules
+    # ESXi has separate firewall rules for NFS v3 and NFS v4.1. If the NFS41Client
+    # rule is disabled, the mount will silently fail or hang — surface this early
     Write-Host "  [CHECK] NFS Firewall Rules:" -ForegroundColor Gray
     $FirewallRules = Get-VMHostFirewallException -VMHost $DiagHost | Where-Object {$_.Name -like "*NFS*"}
     foreach ($Rule in $FirewallRules) {
@@ -455,7 +510,9 @@ if ($NFSVersion -eq 'nfsv4') {
         Write-Host "    $($Rule.Name): $Status" -ForegroundColor $Color
     }
 
-    # Check network connectivity
+    # Ping is issued via esxcli so it travels over the ESXi VMkernel network stack,
+    # not the management network where this script runs. This confirms that the
+    # FlashArray NFS VIF is reachable from the dataplane path ESXi will actually use
     Write-Host "  [CHECK] Network Connectivity:" -ForegroundColor Gray
     try {
         $EsxCli = Get-EsxCli -VMHost $DiagHost -V2
@@ -473,14 +530,17 @@ if ($NFSVersion -eq 'nfsv4') {
         Write-Host "    Ping test failed: $_" -ForegroundColor Yellow
     }
 
-    # Check VMkernel adapters
+    # NFS traffic must flow over a VMkernel adapter. Listing them with MTU helps
+    # diagnose jumbo frame mismatches that cause silent throughput degradation
     Write-Host "  [CHECK] VMkernel Adapters:" -ForegroundColor Gray
     $VMKAdapters = Get-VMHostNetworkAdapter -VMHost $DiagHost -VMKernel
     foreach ($Adapter in $VMKAdapters) {
         Write-Host "    $($Adapter.Name): $($Adapter.IP) (MTU: $($Adapter.Mtu))" -ForegroundColor Gray
     }
 
-    # Check existing NFS 4.1 mounts
+    # Listing existing NFS 4.1 mounts provides context when troubleshooting a
+    # failed mount — e.g., the same export mounted under a different name causes
+    # a duplicate-mount error that is hard to diagnose without this context
     Write-Host "  [CHECK] Existing NFS 4.1 Mounts:" -ForegroundColor Gray
     try {
         $ExistingNFS41 = $EsxCli.storage.nfs41.list.Invoke()
@@ -503,7 +563,7 @@ if ($NFSVersion -eq 'nfsv4') {
 Write-Host "`n[STEP 10] Mounting NFS datastore to cluster hosts..." -ForegroundColor Cyan
 
 try {
-    # Get all hosts in the cluster
+    # Sort alphabetically for consistent, readable log output across runs
     $VMHosts = Get-Cluster -Name $vCenterCluster | Get-VMHost | Sort-Object Name
     Write-Host "[INFO] Found $($VMHosts.Count) hosts in cluster" -ForegroundColor Yellow
 
@@ -514,21 +574,23 @@ try {
         Write-Host "[ERROR] No hosts found in cluster '$vCenterCluster'" -ForegroundColor Red
         Disconnect-VIServer -Server $vCenterServer -Confirm:$false
         exit 1
-    }   
+    }
 
     foreach ($VMHost in $VMHosts) {
         try {
             Write-Host "  [INFO] Mounting to host: $($VMHost.Name)..." -ForegroundColor Gray
 
             if ($NFSVersion -eq 'nfsv4') {
-                # NFS 4.1 with nconnect
+                # esxcli is used as the primary path for NFS 4.1 because New-Datastore
+                # does not expose the nconnect parameter — only esxcli storage.nfs41.add
+                # supports setting the number of parallel TCP sessions (connections)
                 try {
                     Write-Host "    [DEBUG] Using esxcli method for NFS 4.1" -ForegroundColor DarkGray
 
-                    # Mount NFS 4.1 datastore using esxcli for better control
+                    # -V2 returns a strongly-typed argument object rather than positional
+                    # args, which prevents parameter-order bugs across ESXi versions
                     $EsxCli = Get-EsxCli -VMHost $VMHost -V2
 
-                    # Create arguments for NFS 4.1 mount
                     $MountArgs = $EsxCli.storage.nfs41.add.CreateArgs()
                     $MountArgs.host = $FlashArrayEndpoint
                     $MountArgs.share = $NFSExportPath
@@ -539,10 +601,12 @@ try {
                     Write-Host "      Share: $($MountArgs.share)" -ForegroundColor DarkGray
                     Write-Host "      Volume: $($MountArgs.volumename)" -ForegroundColor DarkGray
 
-                    # Add nconnect parameter if supported (vSphere 7.0 U1+)
+                    # nconnect opens multiple TCP sessions to the FlashArray, improving
+                    # throughput by parallelizing I/O. Setting it will throw on ESXi < 7.0 U1,
+                    # so it's wrapped in its own try/catch to degrade gracefully to a
+                    # single-session mount rather than aborting the entire host
                     if ($NconnectSessions -gt 1) {
                         try {
-                            # Try to set nconnect - may not be supported on all versions
                             $MountArgs.nconnect = $NconnectSessions
                             Write-Host "      Nconnect: $($MountArgs.nconnect)" -ForegroundColor DarkGray
                         } catch {
@@ -550,11 +614,12 @@ try {
                         }
                     }
 
-                    # Mount the datastore
                     Write-Host "    [DEBUG] Executing mount command..." -ForegroundColor DarkGray
                     $MountResult = $EsxCli.storage.nfs41.add.Invoke($MountArgs)
 
-                    # Verify mount succeeded
+                    # esxcli returns success before the ESXi storage stack finishes
+                    # registering the datastore with vCenter; wait briefly so that the
+                    # subsequent Get-Datastore call finds the new datastore
                     Start-Sleep -Seconds 2
                     $VerifyDS = Get-Datastore -Name $DatastoreName -VMHost $VMHost -ErrorAction SilentlyContinue
 
@@ -565,7 +630,9 @@ try {
                         throw "Mount command succeeded but datastore not visible"
                     }
                 } catch {
-                    # Fallback to PowerCLI cmdlet if esxcli fails
+                    # Fall back to New-Datastore if esxcli fails. This path loses
+                    # nconnect support but keeps the mount attempt alive on hosts
+                    # where the esxcli NFS 4.1 API surface differs (e.g., older builds)
                     Write-Host "    [WARNING] esxcli mount failed: $_" -ForegroundColor Yellow
                     Write-Host "    [INFO] Trying PowerCLI New-Datastore method..." -ForegroundColor Gray
 
@@ -589,7 +656,8 @@ try {
                     }
                 }
             } else {
-                # NFS 3
+                # NFSv3 uses the standard PowerCLI cmdlet — nconnect is not applicable
+                # for NFS 3, and New-Datastore is sufficient for all supported ESXi versions
                 Write-Host "    [DEBUG] Using NFS 3 mount" -ForegroundColor DarkGray
                 New-Datastore -Nfs -VMHost $VMHost `
                     -Name $DatastoreName `
@@ -603,6 +671,8 @@ try {
 
             $MountedCount++
         } catch {
+            # Per-host failures are counted but do not stop the loop — the script
+            # continues mounting remaining hosts and reports a full tally at the end
             Write-Host "    [ERROR] Failed to mount on $($VMHost.Name)" -ForegroundColor Red
             Write-Host "    [ERROR] Error details: $_" -ForegroundColor Red
             $FailedCount++
@@ -624,7 +694,12 @@ try {
 Write-Host "`n[STEP 11] Verifying datastore..." -ForegroundColor Cyan
 
 try {
+    # Query vCenter for the datastore object to confirm it is registered and
+    # visible in inventory — stronger than trusting that individual mount commands returned success
     $Datastore = Get-Datastore -Name $DatastoreName -ErrorAction Stop
+
+    # Retrieve the associated host list so we can confirm the mount count
+    # matches the number of hosts the loop reported as successful
     $DatastoreHosts = $Datastore | Get-VMHost
 
     Write-Host "[OK] Datastore verified" -ForegroundColor Green
@@ -634,6 +709,8 @@ try {
     Write-Host "  Free Space: $([math]::Round($Datastore.FreeSpaceGB, 2)) GB" -ForegroundColor Gray
     Write-Host "  Mounted on: $($DatastoreHosts.Count) hosts" -ForegroundColor Gray
 } catch {
+    # Verification failure is a warning, not fatal — mounts may still be usable
+    # even if the vCenter inventory hasn't fully refreshed yet
     Write-Host "[WARNING] Could not verify datastore: $_" -ForegroundColor Yellow
 }
 
@@ -643,7 +720,8 @@ try {
 
 Write-Host "`n[STEP 12] Disconnecting..." -ForegroundColor Cyan
 
-# Disconnect from vCenter
+# -Confirm:$false suppresses the interactive prompt PowerCLI shows by default;
+# -ErrorAction SilentlyContinue prevents a noisy error if the session already timed out
 try {
     Disconnect-VIServer -Server $vCenterServer -Confirm:$false -ErrorAction SilentlyContinue
     Write-Host "[OK] Disconnected from vCenter" -ForegroundColor Green
@@ -651,7 +729,8 @@ try {
     Write-Host "[WARNING] Failed to disconnect from vCenter" -ForegroundColor Yellow
 }
 
-# Disconnect from FlashArray
+# Disconnect FlashArray session; -ErrorAction SilentlyContinue handles the case
+# where the session was already closed by an earlier error path
 try {
     Disconnect-Pfa2Array -Array $FlashArray -ErrorAction SilentlyContinue
     Write-Host "[OK] Disconnected from FlashArray" -ForegroundColor Green

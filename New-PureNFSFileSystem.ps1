@@ -5,7 +5,11 @@
 .DESCRIPTION
     This script creates a new NFS file system on an Everpure FlashArray with associated
     NFS export, quota, snapshot, and autodir policies. It does NOT mount the filesystem
-    to vCenter - use New-PureNFSDatastore.ps1 for that.
+    to vCenter - use New-NFSDatastore.ps1 for that.
+
+    If you don't care to run two separate scripts, you can create the file system and
+    mount it to vCenter in one step by running New-PureNFSFileSystem.ps1.  See the help 
+    for New-PureNFSFileSystem.ps1 for details.
 
     The credentials for logging into the FlashArray are stored in an XML file.
     You will need to create the XML file outside of this PowerShell script.
@@ -116,7 +120,7 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Everpure NFS File System Creation Script" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-# Import required module
+# PureStoragePowerShellSDK2 provides all Pfa2* cmdlets used throughout this script
 try {
     Import-Module PureStoragePowerShellSDK2 -ErrorAction Stop
     Write-Host "[OK] Module loaded successfully" -ForegroundColor Green
@@ -126,7 +130,9 @@ try {
     exit 1
 }
 
-# Convert size to bytes for quota
+# The FlashArray quota API requires size in raw bytes; convert the human-readable
+# input (e.g., "10TB") by extracting the numeric part and multiplying by the
+# appropriate PowerShell unit constant
 $SizeInBytes = switch -Regex ($FileSystemSize) {
     '(\d+)KB$' { [int64]$matches[1] * 1KB }
     '(\d+)MB$' { [int64]$matches[1] * 1MB }
@@ -146,7 +152,12 @@ Write-Host "[INFO] NFS Version: $NFSVersion" -ForegroundColor Yellow
 Write-Host "`n[STEP 1] Connecting to FlashArray..." -ForegroundColor Cyan
 
 try {
+    # Credentials are stored in an encrypted XML file rather than hardcoded to
+    # avoid exposing passwords in source control or script history
     $FlashArrayCreds = Import-CliXml -Path $FlashArrayCredsPath -ErrorAction Stop
+
+    # -IgnoreCertificateError allows connections to arrays using self-signed certs,
+    # which is common in lab and non-production environments
     $FlashArray = Connect-Pfa2Array -EndPoint $FlashArrayEndpoint `
         -Credential $FlashArrayCreds `
         -IgnoreCertificateError `
@@ -165,11 +176,15 @@ try {
 Write-Host "`n[STEP 2] Creating NFS file system on FlashArray..." -ForegroundColor Cyan
 
 try {
-    # Create the file system
+    # Creates the FlashArray file system object — this is the storage container
+    # that will be exported via NFS
     $FileSystem = New-Pfa2FileSystem -Array $FlashArray -Name $FileSystemName -ErrorAction Stop
     Write-Host "[OK] File system created: $($FileSystem.Name)" -ForegroundColor Green
 
-    # Get the root managed directory
+    # A FlashArray file system exposes its contents through a "managed directory"
+    # (the root directory of the file system). Policies such as NFS export, quota,
+    # snapshot, and autodir are attached to this directory object, not the file
+    # system directly
     $RootManagedDirectory = Get-Pfa2Directory -Array $FlashArray -FileSystemName $FileSystem.Name -ErrorAction Stop
     Write-Host "[OK] Managed directory: $($RootManagedDirectory.Name)" -ForegroundColor Green
 } catch {
@@ -186,14 +201,20 @@ try {
 Write-Host "`n[STEP 3] Creating NFS export policy..." -ForegroundColor Cyan
 
 try {
-    # Create NFS export policy
+    # Creates an NFS export policy that defines how the file system is shared.
+    # UserMappingEnabled $false means the array will not attempt to map UIDs/GIDs
+    # from an identity source (LDAP/AD), which is appropriate for VMware datastores
+    # where only the ESXi host (UID 0) accesses the share
     New-Pfa2PolicyNfs -Array $FlashArray `
         -Name "$($FileSystemName)-export-policy" `
         -UserMappingEnabled $false `
         -Enabled $true `
         -ErrorAction Stop | Out-Null
 
-    # Add client rule with no-root-squash for all clients
+    # Adds a client rule allowing ALL hosts (*) to mount with read-write access.
+    # 'no-root-squash' preserves root privileges — required for ESXi hosts that
+    # mount NFS datastores as UID 0. Restrict RulesClient to specific IPs or
+    # subnets in security-sensitive environments
     New-Pfa2PolicyNfsClientRule -Array $FlashArray `
         -PolicyName "$($FileSystemName)-export-policy" `
         -RulesClient '*' `
@@ -202,7 +223,9 @@ try {
         -RulesNfsVersion $NFSVersion `
         -ErrorAction Stop | Out-Null
 
-    # Assign NFS export policy to the file system
+    # Binds the NFS export policy to the managed directory and sets the export
+    # name, which becomes the last path component of the NFS mount path
+    # (e.g., /FileSystemName on the NFS VIF)
     New-Pfa2DirectoryPolicyNfs -Array $FlashArray `
         -MemberName $RootManagedDirectory.Name `
         -PolicyName "$($FileSystemName)-export-policy" `
@@ -225,20 +248,24 @@ if ($QuotaEnabled) {
     Write-Host "`n[STEP 4] Creating quota policy..." -ForegroundColor Cyan
 
     try {
-        # Create quota policy
+        # Creates the quota policy container
         New-Pfa2PolicyQuota -Array $FlashArray `
             -Name "$($FileSystemName)-quota-policy" `
             -Enabled $true `
             -ErrorAction Stop | Out-Null
 
-        # Add quota rule
+        # Sets a hard capacity limit equal to the requested file system size so
+        # writes are rejected once the directory reaches $SizeInBytes.
+        # RulesEnforced $true makes this a hard limit (writes fail at the cap)
+        # vs. a soft advisory limit
         New-Pfa2PolicyQuotaRule -Array $FlashArray `
             -PolicyName "$($FileSystemName)-quota-policy" `
             -RulesQuotaLimit $SizeInBytes `
             -RulesEnforced $true `
             -ErrorAction Stop | Out-Null
 
-        # Assign quota policy to the file system
+        # Attaches the quota policy to the managed directory so the limit
+        # applies to all data written under the NFS export
         New-Pfa2DirectoryPolicyQuota -Array $FlashArray `
             -MemberName $RootManagedDirectory.Name `
             -PolicyName "$($FileSystemName)-quota-policy" `
@@ -246,6 +273,7 @@ if ($QuotaEnabled) {
 
         Write-Host "[OK] Quota policy created and assigned ($FileSystemSize)" -ForegroundColor Green
     } catch {
+        # Quota failure is non-fatal; the file system is still usable without it
         $ErrorMsg = $_.Exception.Message
         Write-Host "[WARNING] Failed to create quota policy: $ErrorMsg" -ForegroundColor Yellow
     }
@@ -258,20 +286,24 @@ if ($QuotaEnabled) {
 if ($SnapshotEnabled) {
     Write-Host "`n[STEP 5] Creating snapshot policy..." -ForegroundColor Cyan
 
-    # Calculate human-readable time values
+    # Convert millisecond values to hours and days for the human-readable summary
+    # printed at the end — the API only accepts milliseconds
     $EveryHours = [math]::Round($SnapshotRulesEvery / 3600000, 2)
     $EveryDays = [math]::Round($SnapshotRulesEvery / 86400000, 2)
     $KeepForHours = [math]::Round($SnapshotRulesKeepFor / 3600000, 2)
     $KeepForDays = [math]::Round($SnapshotRulesKeepFor / 86400000, 2)
 
     try {
-        # Create snapshot policy
+        # Creates the snapshot policy container
         New-Pfa2PolicySnapshot -Array $FlashArray `
             -Name "$($FileSystemName)-snapshot-policy" `
             -Enabled $true `
             -ErrorAction Stop | Out-Null
 
-        # Add snapshot rule with user-specified parameters
+        # Adds a schedule rule to the policy:
+        #   RulesClientName  — label embedded in the snapshot name (e.g., "daily")
+        #   RulesEvery       — how often to take a snapshot (milliseconds)
+        #   RulesKeepFor     — how long to retain each snapshot before auto-deletion (milliseconds)
         New-Pfa2PolicySnapshotRule -Array $FlashArray `
             -PolicyName "$($FileSystemName)-snapshot-policy" `
             -RulesClientName $SnapshotName `
@@ -279,13 +311,14 @@ if ($SnapshotEnabled) {
             -RulesKeepFor $SnapshotRulesKeepFor `
             -ErrorAction Stop | Out-Null
 
-        # Assign snapshot policy to the file system
+        # Attaches the snapshot policy to the managed directory so automatic
+        # snapshots are taken of the NFS export on the defined schedule
         New-Pfa2DirectoryPolicySnapshot -Array $FlashArray `
             -MemberName $RootManagedDirectory.Name `
             -PolicyName "$($FileSystemName)-snapshot-policy" `
             -ErrorAction Stop | Out-Null
 
-        # Display human-readable snapshot schedule
+        # Choose the most readable unit (days if >= 1 day, otherwise hours)
         if ($EveryDays -ge 1) {
             $EveryText = "$EveryDays days"
         } else {
@@ -303,6 +336,7 @@ if ($SnapshotEnabled) {
         Write-Host "       Interval: Every $EveryText" -ForegroundColor Gray
         Write-Host "      Retention: $KeepForText" -ForegroundColor Gray
     } catch {
+        # Snapshot failure is non-fatal; the file system is still usable without it
         $ErrorMsg = $_.Exception.Message
         Write-Host "[WARNING] Failed to create snapshot policy: $ErrorMsg" -ForegroundColor Yellow
     }
@@ -315,13 +349,17 @@ if ($SnapshotEnabled) {
 Write-Host "`n[STEP 6] Creating autodir policy..." -ForegroundColor Cyan
 
 try {
-    # Create autodir policy
+    # An autodir policy automatically creates subdirectories when an ESX host
+    # accesses a path that does not yet exist, eliminating the need to pre-create
+    # directories before mounting. For VMware this will create a managed directory
+    # for each VM.
     New-Pfa2PolicyAutodir -Array $FlashArray `
         -Name "$($FileSystemName)-autodir-policy" `
         -Enabled $true `
         -ErrorAction Stop | Out-Null
 
-    # Assign autodir policy to the file system
+    # Attaches the autodir policy to the managed directory so on-demand
+    # subdirectory creation applies to the entire NFS export tree
     New-Pfa2DirectoryPolicyAutodir -Array $FlashArray `
         -MemberName $RootManagedDirectory.Name `
         -PolicyName "$($FileSystemName)-autodir-policy" `
@@ -329,6 +367,7 @@ try {
 
     Write-Host "[OK] Autodir policy created and assigned" -ForegroundColor Green
 } catch {
+    # Autodir failure is non-fatal; the file system is still accessible without it
     $ErrorMsg = $_.Exception.Message
     Write-Host "[WARNING] Failed to create autodir policy: $ErrorMsg" -ForegroundColor Yellow
 }
@@ -340,21 +379,22 @@ try {
 Write-Host "`n[STEP 7] Retrieving NFS export path..." -ForegroundColor Cyan
 
 try {
+    # Retrieves the export object created when the NFS policy was assigned, which
+    # contains the resolved mount path reported by the FlashArray
     $NFSExport = Get-Pfa2DirectoryExport -Array $FlashArray `
         -DirectoryName $RootManagedDirectory.Name `
         -ErrorAction Stop
 
-    # Get the actual export path from the FlashArray
-    # For NFS 3, use the export name; for NFS 4.1, use the full path
+    # NFSv3 and NFSv4 use different path conventions on FlashArray:
+    #   NFSv4: clients mount using the full pseudo-root path returned by the array
+    #   NFSv3: clients mount using just the export name as a top-level path
+    # The constructed fallback path is used if the array does not return a .Path
     if ($NFSVersion -eq 'nfsv4') {
-        # NFS 4.1 requires the full path from the FlashArray
         $NFSExportPath = $NFSExport.Path
         if (-not $NFSExportPath) {
-            # Fallback to constructed path
             $NFSExportPath = "/$($FileSystemName)"
         }
     } else {
-        # NFS 3 uses the export name
         $NFSExportPath = "/$($FileSystemName)"
     }
 
@@ -386,6 +426,6 @@ Write-Host "  NFS Export Path: $NFSExportPath" -ForegroundColor Gray
 Write-Host "  FlashArray: $FlashArrayEndpoint" -ForegroundColor Gray
 Write-Host "`n[NEXT STEPS]" -ForegroundColor Yellow
 Write-Host "  To mount this filesystem to vCenter, use:" -ForegroundColor Gray
-Write-Host "    .\\New-PureNFSDatastore.ps1 -DatastoreName '$FileSystemName' -NFSExportPath '$NFSExportPath' -NFSHost '<NFS_VIF_IP>' -vCenterCluster '<cluster>' -vCenterServer '<vcenter>'" -ForegroundColor Gray
+Write-Host "    .\\New-NFSDatastore.ps1 -DatastoreName '$FileSystemName' -NFSExportPath '$NFSExportPath' -NFSHost '<NFS_VIF_IP>' -vCenterCluster '<cluster>' -vCenterServer '<vcenter>'" -ForegroundColor Gray
 Write-Host ""
 

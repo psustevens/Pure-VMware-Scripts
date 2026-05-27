@@ -41,16 +41,16 @@
     .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-01" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com"
 
 .EXAMPLE
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-02" -NFSHost "10.0.0.100" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-01" -NFSHost "10.0.0.100" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 
 
 .EXAMPLE
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-03" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NconnectSessions 8
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-01" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NconnectSessions 8
 
 .EXAMPLE
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-02" -NFSHost "10.0.0.100" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 -NconnectSessions 8
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-01" -NFSHost "10.0.0.100" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -NFSVersion nfsv4 -NconnectSessions 8
 
 .EXAMPLE 
-    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-03" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -vCenterCredsPath "$HOME/Documents/creds/vCenter-creds.xml"
+    .\New-NFSDatastore.ps1 -DatastoreName "NFS-DS-01" -NFSHost "array.domain.com" -NFSExportPath "/NFS-DS-01" -vCenterCluster "Cluster01" -vCenterServer "vcenter.domain.com" -vCenterCredsPath "$HOME/Documents/creds/vCenter-creds.xml"
 
 .NOTES
     Author: David Stevens - Everpure
@@ -94,7 +94,8 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "NFS DATASTORE MOUNT SCRIPT" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-# Import required module
+# VMware.VimAutomation.Core provides Connect-VIServer, Get-Cluster, Get-VMHost,
+# New-Datastore, Get-Datastore, and Get-EsxCli — all cmdlets used in this script
 try {
     Import-Module VMware.VimAutomation.Core -ErrorAction Stop
     Write-Host "[OK] Module loaded successfully" -ForegroundColor Green
@@ -111,7 +112,12 @@ try {
 Write-Host "[STEP 1] Connecting to vCenter..." -ForegroundColor Cyan
 
 try {
+    # Credentials are loaded from an encrypted XML file to avoid hardcoding
+    # passwords in the script or exposing them in shell history
     $vCenterCreds = Import-CliXml -Path $vCenterCredsPath -ErrorAction Stop
+
+    # Out-Null suppresses the VIServer connection object that PowerCLI prints
+    # by default, keeping console output clean
     Connect-VIServer -Server $vCenterServer `
         -Credential $vCenterCreds `
         -ErrorAction Stop | Out-Null
@@ -129,11 +135,14 @@ try {
 Write-Host "`n[STEP 2] Validating vCenter cluster..." -ForegroundColor Cyan
 
 try {
+    # Validate the cluster name before iterating hosts — fail fast with a clear
+    # error rather than silently mounting to zero hosts
     $Cluster = Get-Cluster -Name $vCenterCluster -ErrorAction Stop
     Write-Host "[OK] Found cluster: $($Cluster.Name)" -ForegroundColor Green
 } catch {
     $ErrorMsg = $_.Exception.Message
     Write-Host "[ERROR] Cluster '$vCenterCluster' not found: $ErrorMsg" -ForegroundColor Red
+    # Disconnect before exiting to avoid leaving an orphaned vCenter session
     Disconnect-VIServer -Server $vCenterServer -Confirm:$false
     exit 1
 }
@@ -144,25 +153,28 @@ try {
 
 if ($NFSVersion -eq 'nfsv4') {
     Write-Host "`n[DIAGNOSTICS] Running NFS 4.1 pre-mount checks..." -ForegroundColor Cyan
-    
-    # Get first host for diagnostics
+
+    # Use one representative host for pre-flight checks — we assume the cluster
+    # is homogeneous; a single host is enough to surface version or firewall issues
     $DiagHost = Get-Cluster -Name $vCenterCluster | Get-VMHost | Select-Object -First 1
-    
-    # Check ESXi version
+
+    # NFS 4.1 requires vSphere 6.0+; nconnect (multi-session) requires vSphere 7.0 U1+.
+    # Warn early so the user can abort before attempting mounts that will fail
     Write-Host "  [CHECK] ESXi Version:" -ForegroundColor Gray
     Write-Host "    Host: $($DiagHost.Name)" -ForegroundColor Gray
     Write-Host "    Version: $($DiagHost.Version)" -ForegroundColor Gray
     Write-Host "    Build: $($DiagHost.Build)" -ForegroundColor Gray
-    
+
     if ($DiagHost.Version -lt "6.0") {
         Write-Host "    [WARNING] NFS 4.1 requires vSphere 6.0 or later" -ForegroundColor Yellow
     }
-    
+
     if ($DiagHost.Version -lt "7.0" -and $NconnectSessions -gt 1) {
         Write-Host "    [WARNING] Nconnect requires vSphere 7.0 U1 or later" -ForegroundColor Yellow
     }
 
-    # Check NFS firewall rules
+    # ESXi has separate firewall rules for NFS v3 and NFS v4.1. If the NFS41Client
+    # rule is disabled the mount will silently fail or hang — surface this early
     Write-Host "  [CHECK] NFS Firewall Rules:" -ForegroundColor Gray
     $FirewallRules = Get-VMHostFirewallException -VMHost $DiagHost | Where-Object {$_.Name -like "*NFS*"}
     foreach ($Rule in $FirewallRules) {
@@ -171,7 +183,9 @@ if ($NFSVersion -eq 'nfsv4') {
         Write-Host "    $($Rule.Name): $Status" -ForegroundColor $Color
     }
 
-    # Check network connectivity
+    # Ping is issued via esxcli so it travels over the ESXi VMkernel network stack,
+    # not the management network where this script runs. This verifies that the
+    # NFS VIF is reachable from the dataplane path that ESXi will actually use
     Write-Host "  [CHECK] Network Connectivity:" -ForegroundColor Gray
     try {
         $EsxCli = Get-EsxCli -VMHost $DiagHost -V2
@@ -190,14 +204,17 @@ if ($NFSVersion -eq 'nfsv4') {
         Write-Host "    Ping test failed: $ErrorMsg" -ForegroundColor Yellow
     }
 
-    # Check VMkernel adapters
+    # NFS traffic must flow over a VMkernel adapter. Listing them (with MTU) helps
+    # diagnose jumbo frame mismatches that cause silent throughput degradation
     Write-Host "  [CHECK] VMkernel Adapters:" -ForegroundColor Gray
     $VMKAdapters = Get-VMHostNetworkAdapter -VMHost $DiagHost -VMKernel
     foreach ($Adapter in $VMKAdapters) {
         Write-Host "    $($Adapter.Name): $($Adapter.IP) (MTU: $($Adapter.Mtu))" -ForegroundColor Gray
     }
 
-    # Check existing NFS 4.1 mounts
+    # Listing existing NFS v4.1 mounts provides context when troubleshooting a
+    # failed mount — e.g., the same export may already be mounted under a
+    # different datastore name, which would cause a duplicate-mount error
     Write-Host "  [CHECK] Existing NFS 4.1 Mounts:" -ForegroundColor Gray
     try {
         $ExistingNFS41 = $EsxCli.storage.nfs41.list.Invoke()
@@ -220,6 +237,7 @@ if ($NFSVersion -eq 'nfsv4') {
 
 Write-Host "`n[STEP 3] Mounting datastore to cluster hosts..." -ForegroundColor Cyan
 
+# Sort hosts alphabetically for consistent, readable log output
 $VMHosts = Get-Cluster -Name $vCenterCluster | Get-VMHost | Sort-Object Name
 $MountedCount = 0
 $FailedCount = 0
@@ -237,14 +255,16 @@ foreach ($VMHost in $VMHosts) {
         Write-Host "  [INFO] Mounting to host: $($VMHost.Name)..." -ForegroundColor Gray
 
         if ($NFSVersion -eq 'nfsv4') {
-            # NFS 4.1 with nconnect
+            # esxcli is used as the primary path for NFS 4.1 because New-Datastore
+            # does not expose the nconnect parameter — only esxcli storage.nfs41.add
+            # supports setting the number of parallel TCP sessions (connections)
             try {
                 Write-Host "    [DEBUG] Using esxcli method for NFS 4.1" -ForegroundColor DarkGray
 
-                # Mount NFS 4.1 datastore using esxcli for better control
+                # -V2 returns a strongly-typed argument object rather than positional
+                # args, which avoids parameter-order bugs across ESXi versions
                 $EsxCli = Get-EsxCli -VMHost $VMHost -V2
 
-                # Create arguments for NFS 4.1 mount
                 $MountArgs = $EsxCli.storage.nfs41.add.CreateArgs()
 <#
                 # Display available parameters
@@ -253,7 +273,6 @@ foreach ($VMHost in $VMHosts) {
                     Write-Host "      - $($_.Name)" -ForegroundColor DarkGray
                 }
 #>
-                # Set required parameters
                 $MountArgs.hosts = $NFSHost
                 $MountArgs.share = $NFSExportPath
                 $MountArgs.volumename = $DatastoreName
@@ -263,10 +282,12 @@ foreach ($VMHost in $VMHosts) {
                 Write-Host "      Share:     $($MountArgs.share)" -ForegroundColor DarkGray
                 Write-Host "      Volume:    $($MountArgs.volumename)" -ForegroundColor DarkGray
 #>
-                # Add nconnect parameter if supported (vSphere 7.0 U1+)
+                # nconnect opens multiple TCP sessions to the NFS server, improving
+                # throughput by parallelizing I/O. Setting connections on ESXi < 7.0 U1 
+                # will throw an error, so it's wrapped in its own try/catch to fail
+                # gracefully to a single-session mount instead of aborting entirely
                 if ($NconnectSessions -gt 1) {
                     try {
-                        # Try to set nconnect - may not be supported on all versions
                         $MountArgs.connections = $NconnectSessions
                         Write-Host "      Nconnect: $($MountArgs.connections)" -ForegroundColor DarkGray
                     } catch {
@@ -286,11 +307,12 @@ foreach ($VMHost in $VMHosts) {
                     }
                 }
 #>
-                # Mount the datastore
                 Write-Host "    [DEBUG] Executing mount command, please wait..." -ForegroundColor DarkGray
                 $MountResult = $EsxCli.storage.nfs41.add.Invoke($MountArgs)
 
-                # Verify mount succeeded
+                # esxcli returns success even if the underlying mount is still
+                # in progress; wait briefly so vCenter's inventory catches up
+                # before checking for the datastore object
                 Start-Sleep -Seconds 10
                 $VerifyDS = Get-Datastore -Name $DatastoreName -VMHost $VMHost -ErrorAction SilentlyContinue
 
@@ -301,7 +323,9 @@ foreach ($VMHost in $VMHosts) {
                     throw "Mount command succeeded but datastore not visible"
                 }
             } catch {
-                # Fallback to PowerCLI cmdlet if esxcli fails
+                # Fall back to the PowerCLI New-Datastore cmdlet if esxcli fails.
+                # This path loses nconnect support but keeps the mount attempt alive
+                # on hosts where the esxcli API differs (e.g., older builds)
                 $ErrorMsg = $_.Exception.Message
                 Write-Host "    [WARNING] esxcli mount failed: $ErrorMsg" -ForegroundColor Yellow
                 Write-Host "`n    [INFO] Trying PowerCLI New-Datastore method..." -ForegroundColor Gray
@@ -327,7 +351,8 @@ foreach ($VMHost in $VMHosts) {
                 }
             }
         } else {
-            # NFS 3
+            # NFSv3 uses the standard PowerCLI cmdlet — nconnect is not applicable
+            # for NFS 3, and New-Datastore is sufficient for all supported ESXi versions
             Write-Host "    [DEBUG] Using NFS 3.0 mount" -ForegroundColor DarkGray
             New-Datastore -Nfs -VMHost $VMHost `
                 -Name $DatastoreName `
@@ -341,6 +366,8 @@ foreach ($VMHost in $VMHosts) {
 
         $MountedCount++
     } catch {
+        # Per-host failures are counted but do not stop the loop — the script
+        # continues mounting remaining hosts and reports a full tally at the end
         $ErrorMsg = $_.Exception.Message
         Write-Host "    [ERROR] Failed to mount on $($VMHost.Name)" -ForegroundColor Red
         Write-Host "    [ERROR] Error details: $ErrorMsg" -ForegroundColor Red
@@ -361,7 +388,12 @@ if ($FailedCount -gt 0) {
 Write-Host "`n[STEP 4] Verifying datastore..." -ForegroundColor Cyan
 
 try {
+    # Query vCenter for the datastore object to confirm it is registered and
+    # visible in the inventory — not just that the individual mount commands returned success
     $Datastore = Get-Datastore -Name $DatastoreName -ErrorAction Stop
+
+    # Retrieve the host list associated with this datastore to confirm the mount
+    # count matches expectations (should equal $MountedCount)
     $DatastoreHosts = $Datastore | Get-VMHost
 
     Write-Host "[OK] Datastore verified" -ForegroundColor Green
@@ -371,6 +403,8 @@ try {
     Write-Host "  Free Space: $([math]::Round($Datastore.FreeSpaceGB, 2)) GB" -ForegroundColor Gray
     Write-Host "  Mounted on: $($DatastoreHosts.Count) hosts" -ForegroundColor Gray
 } catch {
+    # Verification failure is a warning rather than fatal — mounts may still be
+    # usable even if vCenter inventory hasn't fully refreshed yet
     $ErrorMsg = $_.Exception.Message
     Write-Host "[WARNING] Could not verify datastore: $ErrorMsg" -ForegroundColor Yellow
 }
@@ -381,7 +415,9 @@ try {
 
 Write-Host "`n[STEP 5] Disconnecting..." -ForegroundColor Cyan
 
-# Disconnect from vCenter
+# -Confirm:$false suppresses the interactive "are you sure?" prompt that
+# Disconnect-VIServer shows by default; -ErrorAction SilentlyContinue prevents
+# a noisy error if the session already timed out
 try {
     Disconnect-VIServer -Server $vCenterServer -Confirm:$false -ErrorAction SilentlyContinue
     Write-Host "[OK] Disconnected from vCenter" -ForegroundColor Green
@@ -413,6 +449,9 @@ Write-Host "========================================`n" -ForegroundColor Cyan
 if ($MountedCount -gt 0) {
     Write-Host "[SUCCESS] NFS datastore mount completed!`n" -ForegroundColor Green
 } else {
+    # Exit with a non-zero code when zero hosts were mounted so that calling
+    # scripts or CI pipelines can detect a total failure rather than treating
+    # an empty mount as a success
     Write-Host "[FAILED] No hosts were successfully mounted!`n" -ForegroundColor Red
     exit 1
 }
