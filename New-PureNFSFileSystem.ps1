@@ -15,34 +15,99 @@
     $FlashArrayCreds | Export-CliXml -Path "$HOME/Documents/creds/FA-creds.xml"
 
 .PARAMETER FileSystemName
-    (Required) Name of the NFS file system to create on the FlashArray
+    (Required, String) Name of the NFS file system to create on the FlashArray.
+    This will also be used as the prefix for all associated policy names.
+
+    Examples: "NFS-DS-01", "VMware-Prod-NFS", "Test-FS-100GB"
 
 .PARAMETER FileSystemSize
-    (Required) Size of the file system (e.g., 16TB, 5000GB)
+    (Required, String) Size of the file system using format: <number><unit>
+    where unit is KB, MB, GB, TB, or PB.
+    This size is used to set the quota limit if quota is enabled.
+
+    Valid formats: 100GB, 16TB, 5000GB, 2PB
+    Examples: "10TB", "500GB", "2TB"
 
 .PARAMETER FlashArrayEndpoint
-    (Required) FQDN or IP address of the Everpure FlashArray management interface
+    (Required, String) FQDN or IP address of the Everpure FlashArray management interface.
+    This is the management endpoint, not the data VIF.
+
+    Examples: "array.domain.com", "sn1-x90r2-f07-27.fsa.lab", "10.1.1.100"
 
 .PARAMETER NFSVersion
-    (Optional) NFS version to use: 'nfsv3' or 'nfsv4' (default: nfsv3)
+    (Optional, String) NFS protocol version to use for the export.
+
+    Valid values:
+      - 'nfsv3' = NFS version 3 (default, most compatible)
+      - 'nfsv4' = NFS version 4.1 (newer, supports multipathing with nconnect)
+
+    Default: nfsv3
 
 .PARAMETER QuotaEnabled
-    (Optional) Enable quota policy (default: $true)
+    (Optional, Boolean) Enable or disable quota policy enforcement on the file system.
+    When enabled, the file system will be limited to the size specified in FileSystemSize.
+
+    Valid values: $true or $false
+    Default: $true
 
 .PARAMETER SnapshotEnabled
-    (Optional)  Enable snapshot policy (default: $true)
+    (Optional, Boolean) Enable or disable automatic snapshot policy.
+    When enabled, snapshots will be taken at the interval specified by SnapshotRulesEvery
+    and retained for the duration specified by SnapshotRulesKeepFor.
+
+    Valid values: $true or $false
+    Default: $true
 
 .PARAMETER SnapshotRulesEvery
-    (Optional) Snapshot interval in milliseconds (default: 86400000 = 1 day, range: 5 min to 1 year)
+    (Optional, Int64) Snapshot interval in milliseconds.
+    Controls how frequently snapshots are automatically taken.
+
+    Type: Int64 (64-bit integer)
+    Range: 300000 to 31536000000 (5 minutes to 1 year)
+    Default: 86400000 (1 day = 24 hours)
+
+    Common values:
+      - 5 minutes  = 300000
+      - 1 hour     = 3600000
+      - 6 hours    = 21600000
+      - 1 day      = 86400000 (default)
+      - 7 days     = 604800000
+      - 30 days    = 2592000000
 
 .PARAMETER SnapshotRulesKeepFor
-    (Optional) Snapshot retention in milliseconds (default: 604800000 = 7 days, range: 5 min to 5 years)
+    (Optional, Int64) Snapshot retention duration in milliseconds.
+    Controls how long snapshots are kept before being automatically deleted.
+
+    Type: Int64 (64-bit integer)
+    Range: 300000 to 157680000000 (5 minutes to 5 years)
+    Default: 604800000 (7 days = 168 hours)
+
+    Common values:
+      - 1 day      = 86400000
+      - 7 days     = 604800000 (default)
+      - 30 days    = 2592000000
+      - 90 days    = 7776000000
+      - 1 year     = 31536000000
 
 .PARAMETER SnapshotName
-    (Optional) Snapshot name for naming snapshots (default: 'daily')
+    (Optional, String) Client name used in snapshot naming convention.
+    This name is used as a prefix or identifier for snapshots created by this policy.
+    Should describe the snapshot frequency or purpose.
+
+    Type: String
+    Default: 'daily'
+    Examples: "hourly", "daily", "weekly", "monthly", "production"
 
 .PARAMETER FlashArrayCredsPath
-    (Optional) Path to FlashArray credentials XML file (default: $HOME/Documents/creds/FA-creds.xml)
+    (Optional, String) Full path to the FlashArray credentials XML file.
+    This file should contain a PSCredential object exported using Export-CliXml.
+    The file is encrypted and can only be read by the same user on the same computer.
+
+    Type: String (file path)
+    Default: "$HOME/Documents/creds/FA-creds.xml"
+
+    To create credentials file, run: .\Setup-Credentials.ps1
+    Or manually: Get-Credential | Export-CliXml -Path "<path>"
 
 .EXAMPLE
     .\New-PureNFSFileSystem.ps1 -FileSystemName "NFS-FS-01" -FileSystemSize 10TB -NFSVersion nfsv3 -FlashArrayEndpoint "sn1-x90r2-f07-27.fsa.lab"

@@ -145,6 +145,34 @@
             "cwd": "${workspaceFolder}"
         },
         {
+            "name": "Setup-Credentials: All",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/Setup-Credentials.ps1",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Setup-Credentials: FlashArray Only",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/Setup-Credentials.ps1",
+            "args": [
+                "-FlashArrayOnly"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Setup-Credentials: vCenter Only",
+            "type": "PowerShell",
+            "request": "launch",
+            "script": "${workspaceFolder}/Setup-Credentials.ps1",
+            "args": [
+                "-vCenterOnly"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
             "name": "PowerShell: Interactive Session",
             "type": "PowerShell",
             "request": "launch",
